@@ -11,21 +11,40 @@
 #define MAX_TEXTO 256
 #define MAX_NOMBRE 50
 
+// Constantes de control para la COLA GLOBAL
+#define MT_GLOBAL_JOIN 1L
+#define MT_GLOBAL_SEND 3L 
+
+// Comandos semánticos dentro del payload
+#define CMD_JOIN 1
+#define CMD_SEND 2
+
 // Estructura para los mensajes
 struct mensaje {
-    long mtype;         // Tipo de mensaje
+    long mtype;                 // Tipo de mensaje
+    int   cmd;                  // CMD_JOIN / CMD_SEND
+    pid_t pid;                  // PID del cliente
+    int   client_qid;           // (reservado si luego usas cola privada)
+    int   sala_qid;             // qid de la sala (respuesta JOIN)
     char remitente[MAX_NOMBRE];
     char texto[MAX_TEXTO];
     char sala[MAX_NOMBRE];
 };
 
-// Estructura para una sala de chat
+#define MSGSIZE (sizeof(struct mensaje) - sizeof(long))
+
+struct usuario {
+    pid_t pid;
+    char  nombre[MAX_NOMBRE];
+};
+
 struct sala {
     char nombre[MAX_NOMBRE];
-    int cola_id;        // ID de la cola de mensajes de la sala
-    int num_usuarios;
-    char usuarios[MAX_USUARIOS_POR_SALA][MAX_NOMBRE];
+    int  cola_id;        // ID de la cola de la sala
+    int  num_usuarios;
+    struct usuario usuarios[MAX_USUARIOS_POR_SALA];
 };
+
 
 struct sala salas[MAX_SALAS];
 int num_salas = 0;
@@ -37,7 +56,7 @@ int crear_sala(const char *nombre) {
     }
 
     // Crear una cola de mensajes para la sala
-    key_t key = ftok("/tmp", num_salas + 1); // Generar una clave única
+    key_t key = ftok("/tmp", (int)('A' + num_salas)); // Generar una clave única
     int cola_id = msgget(key, IPC_CREAT | 0666);
     if (cola_id == -1) {
         perror("Error al crear la cola de la sala");
@@ -64,47 +83,45 @@ int buscar_sala(const char *nombre) {
 }
 
 // Función para agregar un usuario a una sala
-int agregar_usuario_a_sala(int indice_sala, const char *nombre_usuario) {
-    if (indice_sala < 0 || indice_sala >= num_salas) {
-        return -1;
-    }
-
+int agregar_usuario(int indice_sala, const char *nombre_usuario, pid_t pid) {
+    if (indice_sala < 0 || indice_sala >= num_salas) return -1;
     struct sala *s = &salas[indice_sala];
-    if (s->num_usuarios >= MAX_USUARIOS_POR_SALA) {
-        return -1; // Sala llena
-    }
+    if (s->num_usuarios >= MAX_USUARIOS_POR_SALA) return -1;
 
-    // Verificar si el usuario ya está en la sala
+    // Evitar duplicados por nombre o PID
     for (int i = 0; i < s->num_usuarios; i++) {
-        if (strcmp(s->usuarios[i], nombre_usuario) == 0) {
-            return -1; // Usuario ya está en la sala
-        }
+        if (s->usuarios[i].pid == pid || strcmp(s->usuarios[i].nombre, nombre_usuario) == 0)
+            return 0;
     }
 
-    // Agregar el usuario
-    strcpy(s->usuarios[s->num_usuarios], nombre_usuario);
+    s->usuarios[s->num_usuarios].pid = pid;
+    strncpy(s->usuarios[s->num_usuarios].nombre, nombre_usuario, MAX_NOMBRE);
     s->num_usuarios++;
     return 0;
 }
 
-// Función para enviar un mensaje a todos los usuarios de una sala
-void enviar_a_todos_en_sala(int indice_sala, struct mensaje *msg) {
-    if (indice_sala < 0 || indice_sala >= num_salas) {
-        return;
-    }
-
+void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const char *texto) {
+    if (indice_sala < 0 || indice_sala >= num_salas) return;
     struct sala *s = &salas[indice_sala];
+
     for (int i = 0; i < s->num_usuarios; i++) {
-        // Enviar el mensaje a la cola de la sala
-        if (msgsnd(s->cola_id, msg, sizeof(struct mensaje) - sizeof(long), 0) == -1) {
-            perror("Error al enviar mensaje a la sala");
+        if (strcmp(s->usuarios[i].nombre, remitente) == 0) continue; // no al remitente
+
+        struct mensaje out = {0};
+        out.mtype = (long)s->usuarios[i].pid;   // clave: mtype = PID del receptor
+        out.cmd   = CMD_SEND;
+        strncpy(out.remitente, remitente, MAX_NOMBRE);
+        strncpy(out.texto,     texto,     MAX_TEXTO);
+
+        if (msgsnd(s->cola_id, &out, MSGSIZE, 0) == -1) {
+            perror("Error al reenviar a la sala");
         }
     }
 }
 
 int main() {
     // Crear la cola global para solicitudes de clientes
-    key_t key_global = ftok("/tmp", 'A');
+    key_t key_global = ftok("/tmp", 'G');
     int cola_global = msgget(key_global, IPC_CREAT | 0666);
     if (cola_global == -1) {
         perror("Error al crear la cola global");
@@ -113,54 +130,52 @@ int main() {
 
     printf("Servidor de chat iniciado. Esperando clientes...\n");
 
-    struct mensaje msg;
+struct mensaje msg;
 
-    while (1) {
-        // Recibir mensajes de la cola global
-        if (msgrcv(cola_global, &msg, sizeof(struct mensaje) - sizeof(long), 0, 0) == -1) {
-            perror("Error al recibir mensaje");
-            continue;
+while (1) {
+    if (msgrcv(cola_global, &msg, MSGSIZE, 0, 0) == -1) {
+        perror("Error al recibir mensaje");
+        continue;
+    }
+
+    if (msg.mtype == MT_GLOBAL_JOIN && msg.cmd == CMD_JOIN) {
+        // JOIN
+        int indice_sala = buscar_sala(msg.sala);
+        if (indice_sala == -1) {
+            indice_sala = crear_sala(msg.sala);
+            if (indice_sala == -1) {
+                printf("No se pudo crear la sala %s\n", msg.sala);
+                continue;
+            }
+            printf("Nueva sala creada: %s\n", msg.sala);
         }
 
-        // Procesar el mensaje según su tipo
-        if (msg.mtype == 1) { // JOIN
-            printf("Solicitud de unirse a la sala: %s por %s\n", msg.sala, msg.remitente);
+        if (agregar_usuario(indice_sala, msg.remitente, msg.pid) == 0) {
+            printf("Usuario %s agregado a la sala %s\n", msg.remitente, msg.sala);
 
-            // Buscar o crear la sala
-            int indice_sala = buscar_sala(msg.sala);
-            if (indice_sala == -1) {
-                indice_sala = crear_sala(msg.sala);
-                if (indice_sala == -1) {
-                    printf("No se pudo crear la sala %s\n", msg.sala);
-                    continue;
-                }
-                printf("Nueva sala creada: %s\n", msg.sala);
+            // Respuesta dirigida: mtype = PID del cliente
+            struct mensaje out = {0};
+            out.mtype   = (long)msg.pid;
+            out.cmd     = CMD_JOIN;
+            out.sala_qid= salas[indice_sala].cola_id;
+            snprintf(out.texto, MAX_TEXTO, "Te has unido a la sala: %s", msg.sala);
+
+            if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1) {
+                perror("Error al enviar confirmación");
             }
+        } else {
+            printf("No se pudo agregar al usuario %s a la sala %s\n", msg.remitente, msg.sala);
+        }
 
-            // Agregar el usuario a la sala
-            if (agregar_usuario_a_sala(indice_sala, msg.remitente) == 0) {
-                printf("Usuario %s agregado a la sala %s\n", msg.remitente, msg.sala);
-
-                // Enviar confirmación al cliente (usando el mismo tipo de mensaje)
-                msg.mtype = 2; // Tipo de respuesta
-                sprintf(msg.texto, "Te has unido a la sala: %s", msg.sala);
-                if (msgsnd(cola_global, &msg, sizeof(struct mensaje) - sizeof(long), 0) == -1) {
-                    perror("Error al enviar confirmación");
-                }
-            } else {
-                printf("No se pudo agregar al usuario %s a la sala %s\n", msg.remitente, msg.sala);
-            }
-        } else if (msg.mtype == 3) { // MSG
+    } else if (msg.mtype == MT_GLOBAL_SEND && msg.cmd == CMD_SEND) {
+        // Mensaje para la sala
+        int indice_sala = buscar_sala(msg.sala);
+        if (indice_sala != -1) {
             printf("Mensaje en la sala %s de %s: %s\n", msg.sala, msg.remitente, msg.texto);
-
-            // Buscar la sala
-            int indice_sala = buscar_sala(msg.sala);
-            if (indice_sala != -1) {
-                // Reenviar el mensaje a todos en la sala
-                enviar_a_todos_en_sala(indice_sala, &msg);
-            }
+            enviar_a_sala_menos_remitente(indice_sala, msg.remitente, msg.texto);
         }
     }
+}
 
     return 0;
 }
