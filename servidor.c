@@ -90,7 +90,7 @@ int agregar_usuario(int indice_sala, const char *nombre_usuario, pid_t pid) {
 
     // Evitar duplicados por nombre o PID
     for (int i = 0; i < s->num_usuarios; i++) {
-        if (s->usuarios[i].pid == pid || strcmp(s->usuarios[i].nombre, nombre_usuario) == 0)
+        if (s->usuarios[i].pid == pid)
             return 0;
     }
 
