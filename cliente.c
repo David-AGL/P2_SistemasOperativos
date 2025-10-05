@@ -12,19 +12,23 @@
 
 // Constantes de control para la COLA GLOBAL
 #define MT_GLOBAL_JOIN 1L
-#define MT_GLOBAL_SEND 3L 
+#define MT_GLOBAL_SEND 3L
+#define MT_GLOBAL_SHOW 5L
 
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
 #define CMD_SEND 2
+#define CMD_SHOW 3
+#define CMD_INFO 4
 
 // Estructura para los mensajes
-struct mensaje {
-    long mtype;                 // Tipo de mensaje
-    int   cmd;                  // CMD_JOIN / CMD_SEND
-    pid_t pid;                  // PID del cliente
-    int   client_qid;           // (reservado si luego usas cola privada)
-    int   sala_qid;             // qid de la sala (respuesta JOIN)
+struct mensaje
+{
+    long mtype;     // Tipo de mensaje
+    int cmd;        // CMD_JOIN / CMD_SEND
+    pid_t pid;      // PID del cliente
+    int client_qid; // (reservado si luego usas cola privada)
+    int sala_qid;   // qid de la sala (respuesta JOIN)
     char remitente[MAX_NOMBRE];
     char texto[MAX_TEXTO];
     char sala[MAX_NOMBRE];
@@ -38,30 +42,38 @@ char nombre_usuario[MAX_NOMBRE];
 char sala_actual[MAX_NOMBRE] = "";
 
 // Función para el hilo que recibe mensajes
-void *recibir_mensajes(void *arg) {
+void *recibir_mensajes(void *arg)
+{
     struct mensaje msg;
-    while (1) {
-        if (cola_sala != -1) {
+    while (1)
+    {
+        if (cola_sala != -1)
+        {
             // Leer SOLO mtype = mi PID
             long filtro = (long)getpid();
-            if (msgrcv(cola_sala, &msg, MSGSIZE, filtro, 0) == -1) {
+            if (msgrcv(cola_sala, &msg, MSGSIZE, filtro, 0) == -1)
+            {
                 perror("Error al recibir mensaje de la sala");
                 usleep(100000);
                 continue;
             }
-            if (msg.cmd == CMD_SEND && strcmp(msg.remitente, nombre_usuario) != 0) {
+            if (msg.cmd == CMD_SEND && strcmp(msg.remitente, nombre_usuario) != 0)
+            {
                 printf("%s: %s\n", msg.remitente, msg.texto);
             }
-        } else {
+        }
+        else
+        {
             usleep(100000); // pequeña pausa
         }
     }
     return NULL;
 }
 
-
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
+int main(int argc, char *argv[])
+{
+    if (argc != 2)
+    {
         printf("Uso: %s <nombre_usuario>\n", argv[0]);
         exit(1);
     }
@@ -71,7 +83,8 @@ int main(int argc, char *argv[]) {
     // Conectarse a la cola global
     key_t key_global = ftok("/tmp", 'G');
     cola_global = msgget(key_global, 0666);
-    if (cola_global == -1) {
+    if (cola_global == -1)
+    {
         perror("Error al conectar a la cola global");
         exit(1);
     }
@@ -85,59 +98,101 @@ int main(int argc, char *argv[]) {
     struct mensaje msg;
     char comando[MAX_TEXTO];
 
-    while (1) {
+    while (1)
+    {
         printf("> ");
         fgets(comando, MAX_TEXTO, stdin);
         comando[strcspn(comando, "\n")] = '\0'; // Eliminar el salto de línea
 
-        if (strncmp(comando, "join ", 5) == 0) {
-    char sala[MAX_NOMBRE];
-    sscanf(comando, "join %s", sala);
+        if (strncmp(comando, "join ", 5) == 0)
+        {
+            char sala[MAX_NOMBRE];
+            sscanf(comando, "join %s", sala);
 
-    struct mensaje msg = {0};
-    msg.mtype = MT_GLOBAL_JOIN;     // 1
-    msg.cmd   = CMD_JOIN;
-    msg.pid   = getpid();
-    strcpy(msg.remitente, nombre_usuario);
-    strcpy(msg.sala, sala);
+            struct mensaje msg = {0};
+            msg.mtype = MT_GLOBAL_JOIN; // 1
+            msg.cmd = CMD_JOIN;
+            msg.pid = getpid();
+            strcpy(msg.remitente, nombre_usuario);
+            strcpy(msg.sala, sala);
 
-    if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1) {
-        perror("Error al enviar solicitud de JOIN");
-        continue;
-    }
+            if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1)
+            {
+                perror("Error al enviar solicitud de JOIN");
+                continue;
+            }
 
-    // Esperar confirmación dirigida: mtype = mi PID
-    if (msgrcv(cola_global, &msg, MSGSIZE, (long)getpid(), 0) == -1) {
-        perror("Error al recibir confirmación");
-        continue;
-    }
+            // Esperar confirmación dirigida: mtype = mi PID
+            if (msgrcv(cola_global, &msg, MSGSIZE, (long)getpid(), 0) == -1)
+            {
+                perror("Error al recibir confirmación");
+                continue;
+            }
 
-    printf("%s\n", msg.texto);
+            printf("%s\n", msg.texto);
 
-    // El servidor nos da el qid de la sala
-    cola_sala = msg.sala_qid;
-    if (cola_sala == -1) {
-        fprintf(stderr, "Error: qid de sala inválido\n");
-        continue;
-    }
-    strcpy(sala_actual, sala);
-} else if (strlen(comando) > 0) {
-    if (strlen(sala_actual) == 0 || cola_sala == -1) {
-        printf("No estás en ninguna sala. Usa 'join <sala>' para unirte a una.\n");
-        continue;
-    }
+            // El servidor nos da el qid de la sala
+            cola_sala = msg.sala_qid;
+            if (cola_sala == -1)
+            {
+                fprintf(stderr, "Error: qid de sala inválido\n");
+                continue;
+            }
+            strcpy(sala_actual, sala);
+        }
+        else if (strcmp(comando, "show") == 0)
+        {
+            // Enviar petición SHOW por la cola global
+            struct mensaje req = {0};
+            req.mtype = MT_GLOBAL_SHOW; // mtype que usas para 'show'
+            req.cmd = CMD_SHOW;         // comando 'show'
+            req.pid = getpid();         // para que el servidor responda a tu PID
 
-    struct mensaje msg = {0};
-    msg.mtype = MT_GLOBAL_SEND;     // 3 (tu “MSG”)
-    msg.cmd   = CMD_SEND;
-    msg.pid   = getpid();
-    strcpy(msg.remitente, nombre_usuario);
-    strcpy(msg.sala, sala_actual);
-    strcpy(msg.texto, comando);
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
+            {
+                perror("msgsnd show");
+                continue;
+            }
 
-    if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1) {
-        perror("Error al enviar mensaje");
-        continue;
+            // Esperar la respuesta informativa dirigida a mí (mtype = mi PID)
+            struct mensaje resp = {0};
+            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
+            {
+                perror("msgrcv show");
+                continue;
+            }
+
+            // El servidor debe responder con CMD_INFO y el listado en 'texto'
+            if (resp.cmd == CMD_INFO)
+            {
+                puts(resp.texto);
+            }
+            else
+            {
+                // Por si el servidor respondiera otra cosa
+                printf("[show] Respuesta inesperada (cmd=%d)\n", resp.cmd);
+            }
+        }
+        else if (strlen(comando) > 0)
+        {
+            if (strlen(sala_actual) == 0 || cola_sala == -1)
+            {
+                printf("No estás en ninguna sala. Usa 'join <sala>' para unirte a una.\n");
+                continue;
+            }
+
+            struct mensaje msg = {0};
+            msg.mtype = MT_GLOBAL_SEND; // 3 (tu “MSG”)
+            msg.cmd = CMD_SEND;
+            msg.pid = getpid();
+            strcpy(msg.remitente, nombre_usuario);
+            strcpy(msg.sala, sala_actual);
+            strcpy(msg.texto, comando);
+
+            if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1)
+            {
+                perror("Error al enviar mensaje");
+                continue;
             }
         }
     }
