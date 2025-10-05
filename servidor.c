@@ -6,11 +6,15 @@
 #include <sys/ipc.h>   // Manejo de colas de mensajes System V
 #include <sys/msg.h>   // Manejo de colas de mensajes System V
 #include <unistd.h>    // Unix standard
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/file.h>
 
 #define MAX_SALAS 10
 #define MAX_USUARIOS_POR_SALA 20
 #define MAX_TEXTO 256
 #define MAX_NOMBRE 50
+#define LOG_DIR "logs"
 
 // Constantes de control para la COLA GLOBAL
 #define MT_GLOBAL_JOIN 1L
@@ -26,6 +30,7 @@
 #define CMD_SEND 2
 #define CMD_SHOW 3
 #define CMD_INFO 4
+#define CMD_HISTORY 6
 #define CMD_SHOW_ALL 8
 #define CMD_LEAVE 9
 #define CMD_SHOW_USERS 11
@@ -138,7 +143,7 @@ static void guardar_sala_si_nueva(const char *nombre)
     fclose(f);
 }
 
-// Carfa las salas desde "salas.txt" al iniciar el servidor
+// Carga las salas desde "salas.txt" al iniciar el servidor
 static void cargar_salas_desde_archivo(void)
 {
     FILE *f = fopen("salas.txt", "r");
@@ -209,6 +214,7 @@ int remover_usuario(int indice_sala, pid_t pid)
     return -1;
 }
 
+// Función para enviar el mensaje a todos los miembrios de una sala, excepto al remitente
 void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const char *texto)
 {
     if (indice_sala < 0 || indice_sala >= num_salas)
@@ -233,6 +239,7 @@ void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const
     }
 }
 
+// Función para encontrar la sala en la que está un cliente específico
 static int encontrar_sala_por_pid(pid_t pid_busca)
 {
     for (int i = 0; i < num_salas; i++)
@@ -248,6 +255,7 @@ static int encontrar_sala_por_pid(pid_t pid_busca)
     return -1; // no está en ninguna sala
 }
 
+// Función para listar los usuarios de un canal
 static void listar_usuarios_de_sala_en_texto(int idx_sala, char *dst, size_t dstsz)
 {
     if (idx_sala < 0 || idx_sala >= num_salas || dstsz == 0)
@@ -287,6 +295,7 @@ static void listar_usuarios_de_sala_en_texto(int idx_sala, char *dst, size_t dst
     }
 }
 
+// Función para listar todos los usuarios de todos los canales
 static void listar_todos_los_usuarios_en_texto(char *dst, size_t dstsz)
 {
     if (dstsz == 0)
@@ -333,6 +342,163 @@ static void listar_todos_los_usuarios_en_texto(char *dst, size_t dstsz)
         }
     }
 }
+
+// Busca el archivo en el que va a guardar los logs
+static void ruta_log_sala(const char* nombre_sala, char* path, size_t sz) {
+    snprintf(path, sz, LOG_DIR "/sala_%s.jsonl", nombre_sala);
+}
+
+// escape JSON básico para texto/control
+static void json_escape(const char* in, char* out, size_t outsz) {
+    size_t j = 0;
+    for (size_t i = 0; in && in[i] && j + 6 < outsz; ++i) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '\\' || c == '\"') { out[j++]='\\'; out[j++]=c; }
+        else if (c == '\n') { out[j++]='\\'; out[j++]='n'; }
+        else if (c == '\r') { out[j++]='\\'; out[j++]='r'; }
+        else if (c == '\t') { out[j++]='\\'; out[j++]='t'; }
+        else if (c < 0x20) { j += snprintf(out+j, outsz-j, "\\u%04x", c); }
+        else { out[j++] = c; }
+    }
+    out[j] = '\0';
+}
+
+// append de un mensaje a NDJSON (un JSON por línea)
+static void loguear_mensaje(const char* sala, const char* remitente, const char* texto) {
+    if (!sala || !*sala) return;
+    char path[512]; ruta_log_sala(sala, path, sizeof(path));
+
+    FILE* f = fopen(path, "a");
+    if (!f) {
+        // intentar crear dir y reintentar una vez
+        f = fopen(path, "a");
+        if (!f) { perror("fopen log"); return; }
+    }
+
+    int fd = fileno(f);
+    flock(fd, LOCK_EX);
+
+    time_t ts = time(NULL);
+    char esc_sala[256], esc_from[256], esc_text[1024];
+    json_escape(sala,      esc_sala, sizeof esc_sala);
+    json_escape(remitente, esc_from, sizeof esc_from);
+    json_escape(texto,     esc_text, sizeof esc_text);
+
+    // Registro NDJSON (una línea por mensaje)
+    fprintf(f, "{\"ts\":%ld,\"sala\":\"%s\",\"from\":\"%s\",\"text\":\"%s\"}\n",
+            (long)ts, esc_sala, esc_from, esc_text);
+
+    fflush(f);
+    flock(fd, LOCK_UN);
+    fclose(f);
+}
+
+// Desescapa \" \\ \n \r \t (lo suficiente para tu uso en consola)
+static void json_unescape(const char* in, char* out, size_t outsz){
+    size_t j=0;
+    for (size_t i=0; in && in[i] && j+1 < outsz; ++i){
+        if (in[i] == '\\'){
+            char c = in[++i];
+            if      (c == 'n')  out[j++] = '\n';
+            else if (c == 'r')  out[j++] = '\r';
+            else if (c == 't')  out[j++] = '\t';
+            else if (c == '\\') out[j++] = '\\';
+            else if (c == '\"') out[j++] = '\"';
+            else                out[j++] = c; // caída suave
+        } else {
+            out[j++] = in[i];
+        }
+    }
+    out[j]='\0';
+}
+
+// Extrae "from" y "text" de una línea NDJSON como: {"ts":...,"sala":"...","from":"...","text":"..."}
+static void extraer_from_y_text(const char* json,
+                                char* from, size_t fromsz,
+                                char* text, size_t textsz)
+{
+    const char *pf = strstr(json, "\"from\":\"");
+    const char *pt = strstr(json, "\"text\":\"");
+    if (!pf || !pt){ from[0]='\0'; text[0]='\0'; return; }
+
+    pf += 8; // avanza tras "from":" 
+    pt += 8; // avanza tras "text":" 
+
+    // Copia hasta la comilla final no escapada
+    char bufF[512]={0}, bufT[1024]={0};
+    size_t i=0;
+    for (; pf[i] && pf[i] != '\"'; ++i){
+        if (pf[i]=='\\' && pf[i+1]) bufF[i++] = pf[i], bufF[i]=pf[i]; // conserva escape para unescape
+        else bufF[i] = pf[i];
+        if (i+1 >= sizeof(bufF)) break;
+    }
+    bufF[i]='\0';
+
+    i=0;
+    for (; pt[i] && pt[i] != '\"'; ++i){
+        if (pt[i]=='\\' && pt[i+1]) bufT[i++] = pt[i], bufT[i]=pt[i];
+        else bufT[i] = pt[i];
+        if (i+1 >= sizeof(bufT)) break;
+    }
+    bufT[i]='\0';
+
+    json_unescape(bufF, from, fromsz);
+    json_unescape(bufT, text, textsz);
+}
+
+// Lee las últimas N líneas del archivo de la sala y las envía al PID como CMD_HISTORY por la cola de la sala
+static void enviar_historial_ultimos(const char* sala, int qid_sala, pid_t pid_dest, int N){
+    if (!sala || !*sala || N <= 0) return;
+
+    char path[512];
+    ruta_log_sala(sala, path, sizeof(path));
+
+    FILE* f = fopen(path, "r");
+    if (!f) return; // no hay historial aún
+
+    // Ring buffer de N punteros a línea
+    char **ring = calloc(N, sizeof(char*));
+    if (!ring){ fclose(f); return; }
+    size_t ring_i = 0, count = 0;
+
+    char *line = NULL;
+    size_t cap = 0;
+    while (getline(&line, &cap, f) != -1){
+        // guardamos copia
+        free(ring[ring_i]);
+        ring[ring_i] = strdup(line);
+        ring_i = (ring_i + 1) % N;
+        if (count < (size_t)N) count++;
+    }
+    free(line);
+    fclose(f);
+
+    // Reproducir en orden cronológico (del más antiguo al más nuevo)
+    size_t start = (count == (size_t)N) ? ring_i : 0;
+    for (size_t k = 0; k < count; ++k){
+        const char* jsonl = ring[(start + k) % N];
+        if (!jsonl) continue;
+
+        char autor[MAX_NOMBRE] = {0};
+        char texto[MAX_TEXTO]  = {0};
+        extraer_from_y_text(jsonl, autor, sizeof autor, texto, sizeof texto);
+
+        // arma mensaje dirigido al cliente (cola de la sala)
+        struct mensaje out = {0};
+        out.mtype = (long)pid_dest;   // SOLO para ese cliente
+        out.cmd   = CMD_HISTORY;      // marcado como historial
+        // remitente = autor original, texto = contenido
+        strncpy(out.remitente, autor, sizeof(out.remitente)-1);
+        strncpy(out.texto,     texto, sizeof(out.texto)-1);
+
+        msgsnd(qid_sala, &out, MSGSIZE, 0);
+    }
+
+    // libera ring
+    for (size_t k = 0; k < (size_t)N; ++k) free(ring[k]);
+    free(ring);
+}
+
 
 int main()
 {
@@ -385,6 +551,7 @@ int main()
                 out.cmd = CMD_JOIN;
                 out.sala_qid = salas[indice_sala].cola_id;
                 snprintf(out.texto, MAX_TEXTO, "Te has unido a la sala: %s", msg.sala);
+                enviar_historial_ultimos(msg.sala, salas[indice_sala].cola_id, msg.pid, 10);
 
                 if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
                 {
@@ -403,6 +570,7 @@ int main()
             if (indice_sala != -1)
             {
                 printf("Mensaje en la sala %s de %s: %s\n", msg.sala, msg.remitente, msg.texto);
+                loguear_mensaje(msg.sala, msg.remitente, msg.texto);
                 enviar_a_sala_menos_remitente(indice_sala, msg.remitente, msg.texto);
             }
         }

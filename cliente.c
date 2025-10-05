@@ -24,6 +24,7 @@
 #define CMD_SEND 2
 #define CMD_SHOW 3
 #define CMD_INFO 4
+#define CMD_HISTORY 6
 #define CMD_SHOW_ALL 8
 #define CMD_LEAVE 9
 #define CMD_SHOW_USERS 11
@@ -66,6 +67,12 @@ void *recibir_mensajes(void *arg)
             if (msg.cmd == CMD_SEND && strcmp(msg.remitente, nombre_usuario) != 0)
             {
                 printf("%s: %s\n", msg.remitente, msg.texto);
+            }
+            if (msg.cmd == CMD_HISTORY)
+            {
+                // Mensaje de historial (no afecta tu sala actual, solo muestra contexto)
+                printf("(hist) %s: %s\n", msg.remitente, msg.texto);
+                continue;
             }
         }
         else
@@ -115,9 +122,9 @@ int main(int argc, char *argv[])
         {
             char sala[MAX_NOMBRE];
             sscanf(comando, "join %s", sala);
-            if (strlen(sala_actual) > 0 && cola_sala != -1)            // Warning para evitar join  de otra sala estando en una
+            if (strlen(sala_actual) > 0 && cola_sala != -1) // Warning para evitar join  de otra sala estando en una
             {
-                printf("Ya estás en la sala '%s'. Usa 'leave %s' primero antes de unirte a otra sala.\n", 
+                printf("Ya estás en la sala '%s'. Usa 'leave %s' primero antes de unirte a otra sala.\n",
                        sala_actual, sala_actual);
                 continue;
             }
@@ -254,12 +261,13 @@ int main(int argc, char *argv[])
         else if (strcmp(comando, "-help") == 0)
         {
             printf(" - join <nombreSala>: Entrar a una sala en específico (crea una sala si no existe)\n"
-                " - leave <nombreSala>: Salir de una sala y volver al lobby \n"
-                " - show: Muestra las salas activas (creadas en la sesión) \n"
-                " - show all: Muestra todas las salas que han sido creadas y están guardadas \n"
-                " - show users: Muesrta los usuarios en ese canal \n"
-                " - show all users: Muestra todos los usuarios de todos los canales \n");
-        } else if (strcmp(comando, "show users") == 0) 
+                   " - leave <nombreSala>: Salir de una sala y volver al lobby \n"
+                   " - show: Muestra las salas activas (creadas en la sesión) \n"
+                   " - show all: Muestra todas las salas que han sido creadas y están guardadas \n"
+                   " - show users: Muesrta los usuarios en ese canal \n"
+                   " - show all users: Muestra todos los usuarios de todos los canales \n");
+        }
+        else if (strcmp(comando, "show users") == 0)
         {
             // si NO estás en sala, feedback local y ya (sin pedir al server)
             if (cola_sala == -1 || sala_actual[0] == '\0')
