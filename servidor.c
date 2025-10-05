@@ -17,6 +17,7 @@
 #define MT_GLOBAL_SEND 3L
 #define MT_GLOBAL_SHOW 5L
 #define MT_GLOBAL_SHOW_ALL 7L
+#define MT_GLOBAL_LEAVE 9L
 
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
@@ -24,6 +25,7 @@
 #define CMD_SHOW 3
 #define CMD_INFO 4
 #define CMD_SHOW_ALL 8
+#define CMD_LEAVE 9
 
 // Estructura para los mensajes
 struct mensaje
@@ -176,6 +178,30 @@ int agregar_usuario(int indice_sala, const char *nombre_usuario, pid_t pid)
     strncpy(s->usuarios[s->num_usuarios].nombre, nombre_usuario, MAX_NOMBRE);
     s->num_usuarios++;
     return 0;
+}
+
+// Función para remover LEAVE un usuario de una sala
+int remover_usuario(int indice_sala, pid_t pid)
+{
+    if (indice_sala < 0 || indice_sala >= num_salas)
+        return -1;
+    
+    struct sala *s = &salas[indice_sala]; 
+    // buscamos el usuario por PID
+    for (int i = 0; i < s->num_usuarios; i++)
+    {
+        if (s->usuarios[i].pid == pid)
+        {
+            // Mover el último usuario a esta posición para llenar el hueco
+            for (int j = i; j < s->num_usuarios - 1; j++)
+            {
+                s->usuarios[j] = s->usuarios[j + 1];
+            }
+            s->num_usuarios--;
+            return 0; 
+        }
+    }
+    return -1; 
 }
 
 void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const char *texto)
@@ -341,6 +367,60 @@ int main()
             if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
             {
                 perror("Error al enviar lista de salas (all)");
+            }
+        }
+        else if (msg.mtype == MT_GLOBAL_LEAVE && msg.cmd == CMD_LEAVE)
+        {
+            // LEAVE
+            int indice_sala = buscar_sala(msg.sala);
+            if (indice_sala != -1)
+            {
+                if (remover_usuario(indice_sala, msg.pid) == 0)
+                {
+                    printf("Usuario %s ha salido de la sala %s\n", msg.remitente, msg.sala);  
+                    // Enviar mensaje del sistema a los usuarios que quedan en la sala
+                    char mensaje_sistema[MAX_TEXTO];
+                    snprintf(mensaje_sistema, MAX_TEXTO, "%s salió de la sala", msg.remitente);
+                    enviar_a_sala_menos_remitente(indice_sala, "", mensaje_sistema);
+                    
+                    struct mensaje out = {0};
+                    out.mtype = (long)msg.pid;
+                    out.cmd = CMD_LEAVE;
+                    snprintf(out.texto, MAX_TEXTO, "Has salido de la sala: %s", msg.sala);
+                    
+                    if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
+                    {
+                        perror("Error al enviar confirmación de LEAVE");
+                    }
+                }
+                else
+                {
+                    printf("No se pudo remover al usuario %s de la sala %s\n", msg.remitente, msg.sala);
+                    
+                    struct mensaje out = {0};
+                    out.mtype = (long)msg.pid;
+                    out.cmd = CMD_LEAVE;
+                    snprintf(out.texto, MAX_TEXTO, "Error: No estabas en la sala %s", msg.sala);
+
+                    if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
+                    {
+                        perror("Error al enviar error de LEAVE");
+                    }
+                }
+            }
+            else
+            {
+                printf("Sala %s no encontrada para LEAVE\n", msg.sala);
+
+                struct mensaje out = {0};
+                out.mtype = (long)msg.pid;
+                out.cmd = CMD_LEAVE;
+                snprintf(out.texto, MAX_TEXTO, "Error: La sala %s no existe", msg.sala);
+                
+                if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
+                {
+                    perror("Error al enviar error de sala no encontrada");
+                }
             }
         }
     }

@@ -15,6 +15,7 @@
 #define MT_GLOBAL_SEND 3L
 #define MT_GLOBAL_SHOW 5L
 #define MT_GLOBAL_SHOW_ALL 7L
+#define MT_GLOBAL_LEAVE 9L
 
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
@@ -22,6 +23,7 @@
 #define CMD_SHOW 3
 #define CMD_INFO 4
 #define CMD_SHOW_ALL 8
+#define CMD_LEAVE 9
 
 // Estructura para los mensajes
 struct mensaje
@@ -204,6 +206,40 @@ int main(int argc, char *argv[])
                 printf("[show all] Respuesta inesperada (cmd=%d)\n", resp.cmd);
             }
         }
+        else if (strncmp(comando, "leave ", 6) == 0)
+        {
+            char sala[MAX_NOMBRE];
+            sscanf(comando, "leave %s", sala);
+            if (strlen(sala) == 0)
+            {
+                printf("Uso: leave <nombre_sala>\n");
+                continue;
+            }
+
+            struct mensaje req = {0};
+            req.mtype = MT_GLOBAL_LEAVE;
+            req.cmd = CMD_LEAVE;
+            req.pid = getpid();
+            strcpy(req.remitente, nombre_usuario);
+            strcpy(req.sala, sala);
+
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1){
+                perror("Error al enviar solicitud de LEAVE");
+                continue;
+            }
+            struct mensaje resp = {0};
+            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
+            {
+                perror("Error al recibir confirmación de LEAVE");
+                continue;
+            }
+
+            printf("%s\n", resp.texto);
+            if (strcmp(sala, sala_actual) == 0) {
+                cola_sala = -1;
+                strcpy(sala_actual, "");
+            }
+        }
         else if (strlen(comando) > 0)
         {
             if (strlen(sala_actual) == 0 || cola_sala == -1)
@@ -213,15 +249,14 @@ int main(int argc, char *argv[])
             }
 
             struct mensaje msg = {0};
-            msg.mtype = MT_GLOBAL_SEND; // 3 (tu “MSG”)
+            msg.mtype = MT_GLOBAL_SEND; 
             msg.cmd = CMD_SEND;
             msg.pid = getpid();
             strcpy(msg.remitente, nombre_usuario);
             strcpy(msg.sala, sala_actual);
             strcpy(msg.texto, comando);
 
-            if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1)
-            {
+            if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1){
                 perror("Error al enviar mensaje");
                 continue;
             }
