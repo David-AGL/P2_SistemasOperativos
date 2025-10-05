@@ -17,6 +17,8 @@
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
 #define CMD_SEND 2
+#define CMD_LEAVE 3   //incluir comando 
+
 
 // Estructura para los mensajes
 struct mensaje {
@@ -50,7 +52,11 @@ void *recibir_mensajes(void *arg) {
                 continue;
             }
             if (msg.cmd == CMD_SEND && strcmp(msg.remitente, nombre_usuario) != 0) {
-                printf("%s: %s\n", msg.remitente, msg.texto);
+                if (strcmp(msg.remitente, "SISTEMA") == 0) {
+                    printf("%s\n", msg.texto);  // mensaje para Sistema cuando usuario sale del chat
+                } else {
+                    printf("%s: %s\n", msg.remitente, msg.texto);  // Formato normal
+                }
             }
         } else {
             usleep(100000); // pequeña pausa
@@ -121,6 +127,31 @@ int main(int argc, char *argv[]) {
         continue;
     }
     strcpy(sala_actual, sala);
+} else if (strncmp(comando, "leave ", 6) == 0) {    //Logica para salir del chat
+            char sala_salir[MAX_NOMBRE];
+            sscanf(comando, "leave %s", sala_salir);
+            
+            if (strlen(sala_actual) == 0) {
+                printf("No estás en ninguna sala.\n");
+                continue;
+            }
+            
+            if (strcmp(sala_salir, sala_actual) != 0) {
+                printf("No estás en la sala %s. Estás en: %s\n", sala_salir, sala_actual);
+                continue;
+            }
+
+            struct mensaje msg = {0};
+            msg.mtype = MT_GLOBAL_JOIN;
+            msg.cmd   = CMD_LEAVE;
+            msg.pid   = getpid();
+            strcpy(msg.remitente, nombre_usuario);
+            strcpy(msg.sala, sala_actual);
+            msgsnd(cola_global, &msg, MSGSIZE, 0);
+
+            cola_sala = -1;
+            sala_actual[0] = '\0';
+            printf("Has salido de la sala %s.\n", sala_salir);  // Confirmación al usuario
 } else if (strlen(comando) > 0) {
     if (strlen(sala_actual) == 0 || cola_sala == -1) {
         printf("No estás en ninguna sala. Usa 'join <sala>' para unirte a una.\n");
@@ -143,4 +174,7 @@ int main(int argc, char *argv[]) {
     }
 
     return 0;
+
+    
+
 }

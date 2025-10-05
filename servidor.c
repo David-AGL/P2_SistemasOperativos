@@ -18,6 +18,8 @@
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
 #define CMD_SEND 2
+#define CMD_LEAVE 3
+
 
 // Estructura para los mensajes
 struct mensaje {
@@ -100,6 +102,25 @@ int agregar_usuario(int indice_sala, const char *nombre_usuario, pid_t pid) {
     return 0;
 }
 
+//Método para -eliminar- usuario de la sala 
+ void eliminar_usuario(int indice_sala, pid_t pid){
+    if (indice_sala < 0 || indice_sala >= num_salas) return;
+    struct sala *s = &salas[indice_sala];
+
+    for (int i = 0; i < s->num_usuarios; i++) {
+        if (s->usuarios[i].pid == pid) {
+            s->usuarios[i] = s->usuarios[s->num_usuarios - 1];
+            s->num_usuarios--;
+            break;
+        }
+    }
+
+ }
+
+
+
+
+
 void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const char *texto) {
     if (indice_sala < 0 || indice_sala >= num_salas) return;
     struct sala *s = &salas[indice_sala];
@@ -167,7 +188,19 @@ while (1) {
             printf("No se pudo agregar al usuario %s a la sala %s\n", msg.remitente, msg.sala);
         }
 
-    } else if (msg.mtype == MT_GLOBAL_SEND && msg.cmd == CMD_SEND) {
+    //LEAVE    
+    } else if (msg.mtype == MT_GLOBAL_JOIN && msg.cmd == CMD_LEAVE) {
+        int indice_sala = buscar_sala(msg.sala);
+        if (indice_sala != -1) {
+            eliminar_usuario(indice_sala, msg.pid);
+            printf("Usuario %s salió de la sala %s\n", msg.remitente, msg.sala);
+            
+            char aviso[MAX_TEXTO];
+            snprintf(aviso, MAX_TEXTO, "%s ha salido de la sala :o.", msg.remitente);
+            enviar_a_sala_menos_remitente(indice_sala, "SISTEMA", aviso);
+        }
+    // SEND 
+    }else if (msg.mtype == MT_GLOBAL_SEND && msg.cmd == CMD_SEND) {
         // Mensaje para la sala
         int indice_sala = buscar_sala(msg.sala);
         if (indice_sala != -1) {
