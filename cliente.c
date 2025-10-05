@@ -53,11 +53,9 @@ void *recibir_mensajes(void *arg)
     {
         if (cola_sala != -1)
         {
-            // Leer SOLO mtype = mi PID
             long filtro = (long)getpid();
-            if (msgrcv(cola_sala, &msg, MSGSIZE, filtro, 0) == -1)
+            if (msgrcv(cola_sala, &msg, MSGSIZE, filtro, IPC_NOWAIT) == -1)
             {
-                perror("Error al recibir mensaje de la sala");
                 usleep(100000);
                 continue;
             }
@@ -68,7 +66,7 @@ void *recibir_mensajes(void *arg)
         }
         else
         {
-            usleep(100000); // pequeña pausa
+            usleep(200000); // pausa mas cuando no hay sala activ
         }
     }
     return NULL;
@@ -112,6 +110,12 @@ int main(int argc, char *argv[])
         {
             char sala[MAX_NOMBRE];
             sscanf(comando, "join %s", sala);
+            if (strlen(sala_actual) > 0 && cola_sala != -1)            // Warning para evitar join  de otra sala estando en una
+            {
+                printf("Ya estás en la sala '%s'. Usa 'leave %s' primero antes de unirte a otra sala.\n", 
+                       sala_actual, sala_actual);
+                continue;
+            }
 
             struct mensaje msg = {0};
             msg.mtype = MT_GLOBAL_JOIN; // 1
