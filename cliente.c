@@ -10,7 +10,7 @@
 #define MAX_TEXTO 256
 #define MAX_NOMBRE 50
 
-// Constantes de control para la COLA GLOBAL
+// Constantes de control para la COLA GLOBAL...
 #define MT_GLOBAL_JOIN 1L
 #define MT_GLOBAL_SEND 3L 
 
