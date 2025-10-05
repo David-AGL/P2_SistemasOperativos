@@ -18,6 +18,8 @@
 #define MT_GLOBAL_SHOW 5L
 #define MT_GLOBAL_SHOW_ALL 7L
 #define MT_GLOBAL_LEAVE 9L
+#define MT_GLOBAL_SHOW_USERS 11L
+#define MT_GLOBAL_SHOW_ALL_USERS 13L
 
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
@@ -26,6 +28,8 @@
 #define CMD_INFO 4
 #define CMD_SHOW_ALL 8
 #define CMD_LEAVE 9
+#define CMD_SHOW_USERS 11
+#define CMD_SHOW_ALL_USERS 13
 
 // Estructura para los mensajes
 struct mensaje
@@ -138,7 +142,8 @@ static void guardar_sala_si_nueva(const char *nombre)
 static void cargar_salas_desde_archivo(void)
 {
     FILE *f = fopen("salas.txt", "r");
-    if (!f) return; // nada que cargar
+    if (!f)
+        return; // nada que cargar
     char nombre[MAX_NOMBRE];
     while (fgets(nombre, sizeof(nombre), f))
     {
@@ -185,8 +190,8 @@ int remover_usuario(int indice_sala, pid_t pid)
 {
     if (indice_sala < 0 || indice_sala >= num_salas)
         return -1;
-    
-    struct sala *s = &salas[indice_sala]; 
+
+    struct sala *s = &salas[indice_sala];
     // buscamos el usuario por PID
     for (int i = 0; i < s->num_usuarios; i++)
     {
@@ -198,10 +203,10 @@ int remover_usuario(int indice_sala, pid_t pid)
                 s->usuarios[j] = s->usuarios[j + 1];
             }
             s->num_usuarios--;
-            return 0; 
+            return 0;
         }
     }
-    return -1; 
+    return -1;
 }
 
 void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const char *texto)
@@ -228,6 +233,107 @@ void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const
     }
 }
 
+static int encontrar_sala_por_pid(pid_t pid_busca)
+{
+    for (int i = 0; i < num_salas; i++)
+    {
+        for (int j = 0; j < salas[i].num_usuarios; j++)
+        {
+            if (salas[i].usuarios[j].pid == pid_busca)
+            {
+                return i; // índice de la sala
+            }
+        }
+    }
+    return -1; // no está en ninguna sala
+}
+
+static void listar_usuarios_de_sala_en_texto(int idx_sala, char *dst, size_t dstsz)
+{
+    if (idx_sala < 0 || idx_sala >= num_salas || dstsz == 0)
+    {
+        if (dstsz)
+            dst[0] = '\0';
+        return;
+    }
+    size_t off = 0;
+    int rem = (int)dstsz;
+
+    const char *nombre = salas[idx_sala].nombre;
+    int n = snprintf(dst + off, rem, "Sala: %s (%d usuarios)\n",
+                     nombre, salas[idx_sala].num_usuarios);
+    if (n < 0)
+        return;
+    if (n >= rem)
+    {
+        dst[dstsz - 1] = '\0';
+        return;
+    }
+    off += n;
+    rem -= n;
+
+    for (int u = 0; u < salas[idx_sala].num_usuarios && rem > 1; u++)
+    {
+        n = snprintf(dst + off, rem, " - %s\n", salas[idx_sala].usuarios[u].nombre);
+        if (n < 0)
+            break;
+        if (n >= rem)
+        {
+            dst[dstsz - 1] = '\0';
+            break;
+        }
+        off += n;
+        rem -= n;
+    }
+}
+
+static void listar_todos_los_usuarios_en_texto(char *dst, size_t dstsz)
+{
+    if (dstsz == 0)
+        return;
+    size_t off = 0;
+    int rem = (int)dstsz;
+
+    int n = snprintf(dst + off, rem, "Usuarios por sala:\n");
+    if (n < 0)
+        return;
+    if (n >= rem)
+    {
+        dst[dstsz - 1] = '\0';
+        return;
+    }
+    off += n;
+    rem -= n;
+
+    for (int i = 0; i < num_salas && rem > 1; i++)
+    {
+        n = snprintf(dst + off, rem, "[%s] (%d)\n", salas[i].nombre, salas[i].num_usuarios);
+        if (n < 0)
+            break;
+        if (n >= rem)
+        {
+            dst[dstsz - 1] = '\0';
+            break;
+        }
+        off += n;
+        rem -= n;
+
+        for (int u = 0; u < salas[i].num_usuarios && rem > 1; u++)
+        {
+            n = snprintf(dst + off, rem, " - %s\n", salas[i].usuarios[u].nombre);
+            if (n < 0)
+                break;
+            if (n >= rem)
+            {
+                dst[dstsz - 1] = '\0';
+                break;
+            }
+            off += n;
+            rem -= n;
+        }
+    }
+}
+
 int main()
 {
     // Crear la cola global para solicitudes de clientes
@@ -242,7 +348,6 @@ int main()
     printf("Servidor de chat iniciado. Esperando clientes...\n");
     // Cargar salas desde archivo al iniciar
     cargar_salas_desde_archivo();
-    
 
     struct mensaje msg;
 
@@ -377,17 +482,17 @@ int main()
             {
                 if (remover_usuario(indice_sala, msg.pid) == 0)
                 {
-                    printf("Usuario %s ha salido de la sala %s\n", msg.remitente, msg.sala);  
+                    printf("Usuario %s ha salido de la sala %s\n", msg.remitente, msg.sala);
                     // Enviar mensaje del sistema a los usuarios que quedan en la sala
                     char mensaje_sistema[MAX_TEXTO];
                     snprintf(mensaje_sistema, MAX_TEXTO, "%s salió de la sala", msg.remitente);
                     enviar_a_sala_menos_remitente(indice_sala, "", mensaje_sistema);
-                    
+
                     struct mensaje out = {0};
                     out.mtype = (long)msg.pid;
                     out.cmd = CMD_LEAVE;
                     snprintf(out.texto, MAX_TEXTO, "Has salido de la sala: %s", msg.sala);
-                    
+
                     if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
                     {
                         perror("Error al enviar confirmación de LEAVE");
@@ -396,7 +501,7 @@ int main()
                 else
                 {
                     printf("No se pudo remover al usuario %s de la sala %s\n", msg.remitente, msg.sala);
-                    
+
                     struct mensaje out = {0};
                     out.mtype = (long)msg.pid;
                     out.cmd = CMD_LEAVE;
@@ -416,12 +521,48 @@ int main()
                 out.mtype = (long)msg.pid;
                 out.cmd = CMD_LEAVE;
                 snprintf(out.texto, MAX_TEXTO, "Error: La sala %s no existe", msg.sala);
-                
+
                 if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
                 {
                     perror("Error al enviar error de sala no encontrada");
                 }
             }
+        }
+        else if (msg.mtype == MT_GLOBAL_SHOW_USERS && msg.cmd == CMD_SHOW_USERS)
+        {
+            // Quien pide: msg.pid (y msg.remitente). Buscamos su sala.
+            int idx = encontrar_sala_por_pid(msg.pid);
+
+            struct mensaje out = {0};
+            out.mtype = (long)msg.pid; // respuesta DIRECTA al cliente
+            out.cmd = CMD_SHOW_USERS;
+
+            if (idx == -1)
+            {
+                snprintf(out.texto, sizeof(out.texto),
+                         "No estás en ninguna sala. Usa 'join <sala>'.");
+            }
+            else
+            {
+                listar_usuarios_de_sala_en_texto(idx, out.texto, sizeof(out.texto));
+            }
+            msgsnd(cola_global, &out, MSGSIZE, 0);
+        }
+        else if (msg.mtype == MT_GLOBAL_SHOW_ALL_USERS && msg.cmd == CMD_SHOW_ALL_USERS)
+        {
+            struct mensaje out = {0};
+            out.mtype = (long)msg.pid; // respuesta al cliente
+            out.cmd = CMD_SHOW_ALL_USERS;
+
+            if (num_salas == 0)
+            {
+                snprintf(out.texto, sizeof(out.texto), "No hay salas creadas.");
+            }
+            else
+            {
+                listar_todos_los_usuarios_en_texto(out.texto, sizeof(out.texto));
+            }
+            msgsnd(cola_global, &out, MSGSIZE, 0);
         }
     }
     return 0;

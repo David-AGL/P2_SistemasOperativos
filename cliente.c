@@ -16,6 +16,8 @@
 #define MT_GLOBAL_SHOW 5L
 #define MT_GLOBAL_SHOW_ALL 7L
 #define MT_GLOBAL_LEAVE 9L
+#define MT_GLOBAL_SHOW_USERS 11L
+#define MT_GLOBAL_SHOW_ALL_USERS 13L
 
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
@@ -24,6 +26,8 @@
 #define CMD_INFO 4
 #define CMD_SHOW_ALL 8
 #define CMD_LEAVE 9
+#define CMD_SHOW_USERS 11
+#define CMD_SHOW_ALL_USERS 13
 
 // Estructura para los mensajes
 struct mensaje
@@ -93,7 +97,8 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    printf("Bienvenido, %s. Salas disponibles: General, Deportes\n", nombre_usuario);
+    printf("Bienvenido, %s. Usa <show> para ver las salas activas \n", nombre_usuario);
+    printf("Usa <-help> para conocer los comandos y su uso \n");
 
     // Crear un hilo para recibir mensajes
     pthread_t hilo_receptor;
@@ -180,8 +185,8 @@ int main(int argc, char *argv[])
         else if (strcmp(comando, "show all") == 0)
         {
             struct mensaje req = {0};
-            req.mtype = MT_GLOBAL_SHOW_ALL; 
-            req.cmd = CMD_SHOW_ALL;        
+            req.mtype = MT_GLOBAL_SHOW_ALL;
+            req.cmd = CMD_SHOW_ALL;
             req.pid = getpid();
 
             if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
@@ -223,7 +228,8 @@ int main(int argc, char *argv[])
             strcpy(req.remitente, nombre_usuario);
             strcpy(req.sala, sala);
 
-            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1){
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
+            {
                 perror("Error al enviar solicitud de LEAVE");
                 continue;
             }
@@ -235,11 +241,75 @@ int main(int argc, char *argv[])
             }
 
             printf("%s\n", resp.texto);
-            if (strcmp(sala, sala_actual) == 0) {
+            if (strcmp(sala, sala_actual) == 0)
+            {
                 cola_sala = -1;
                 strcpy(sala_actual, "");
             }
         }
+        else if (strcmp(comando, "-help") == 0)
+        {
+            printf(" - join <nombreSala>: Entrar a una sala en específico (crea una sala si no existe)\n"
+                " - leave <nombreSala>: Salir de una sala y volver al lobby \n"
+                " - show: Muestra las salas activas (creadas en la sesión) \n"
+                " - show all: Muestra todas las salas que han sido creadas y están guardadas \n"
+                " - show users: Muesrta los usuarios en ese canal \n"
+                " - show all users: Muestra todos los usuarios de todos los canales \n");
+        } else if (strcmp(comando, "show users") == 0) 
+        {
+            // si NO estás en sala, feedback local y ya (sin pedir al server)
+            if (cola_sala == -1 || sala_actual[0] == '\0')
+            {
+                printf("No estás en ninguna sala. Usa 'join <sala>'.\n");
+                continue;
+            }
+
+            struct mensaje req = {0};
+            req.mtype = MT_GLOBAL_SHOW_USERS; // canal de control
+            req.cmd = CMD_SHOW_USERS;
+            req.pid = getpid();
+            strcpy(req.remitente, nombre_usuario);
+
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
+            {
+                perror("Error al pedir lista de usuarios");
+                continue;
+            }
+
+            struct mensaje resp = {0};
+            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
+            {
+                perror("Error al recibir lista de usuarios");
+                continue;
+            }
+            // El server trae el texto listo
+            printf("%s\n", resp.texto);
+            continue;
+        } // --- comando: show all users ---
+        else if (strcmp(comando, "show all users") == 0)
+        {
+            struct mensaje req = {0};
+            req.mtype = MT_GLOBAL_SHOW_ALL_USERS; // canal de control
+            req.cmd = CMD_SHOW_ALL_USERS;
+            req.pid = getpid();
+            strcpy(req.remitente, nombre_usuario);
+
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
+            {
+                perror("Error al pedir lista global");
+                continue;
+            }
+
+            struct mensaje resp = {0};
+            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
+            {
+                perror("Error al recibir lista global");
+                continue;
+            }
+            printf("%s\n", resp.texto);
+            continue;
+        }
+
         else if (strlen(comando) > 0)
         {
             if (strlen(sala_actual) == 0 || cola_sala == -1)
@@ -249,14 +319,15 @@ int main(int argc, char *argv[])
             }
 
             struct mensaje msg = {0};
-            msg.mtype = MT_GLOBAL_SEND; 
+            msg.mtype = MT_GLOBAL_SEND;
             msg.cmd = CMD_SEND;
             msg.pid = getpid();
             strcpy(msg.remitente, nombre_usuario);
             strcpy(msg.sala, sala_actual);
             strcpy(msg.texto, comando);
 
-            if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1){
+            if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1)
+            {
                 perror("Error al enviar mensaje");
                 continue;
             }
@@ -265,4 +336,3 @@ int main(int argc, char *argv[])
 
     return 0;
 }
-
