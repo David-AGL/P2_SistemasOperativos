@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <sys/types.h> //Tipos básicos usados por IPC (Intercomutación entre procesos)
 #include <sys/ipc.h>   // Manejo de colas de mensajes System V
 #include <sys/msg.h>   // Manejo de colas de mensajes System V
@@ -15,12 +16,14 @@
 #define MT_GLOBAL_JOIN 1L
 #define MT_GLOBAL_SEND 3L
 #define MT_GLOBAL_SHOW 5L
+#define MT_GLOBAL_SHOW_ALL 7L
 
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
 #define CMD_SEND 2
 #define CMD_SHOW 3
 #define CMD_INFO 4
+#define CMD_SHOW_ALL 8
 
 // Estructura para los mensajes
 struct mensaje
@@ -93,6 +96,66 @@ int buscar_sala(const char *nombre)
     return -1; // No encontrada
 }
 
+// Función para verificar si una sala ya existe en "salas.txt"
+static bool sala_existe_archivo(const char *nombre)
+{
+    FILE *f = fopen("salas.txt", "r");
+    if (!f)
+        return false;
+    char linea[MAX_NOMBRE + 8];
+    bool existe = false;
+    while (fgets(linea, sizeof(linea), f))
+    {
+        linea[strcspn(linea, "\r\n")] = '\0';
+        if (strcmp(linea, nombre) == 0)
+        {
+            existe = true;
+            break;
+        }
+    }
+    fclose(f);
+    return existe;
+}
+
+// Función para guardar el nombre de una sala en "salas.txt" si no existe ya
+static void guardar_sala_si_nueva(const char *nombre)
+{
+    if (sala_existe_archivo(nombre))
+        return;
+    FILE *f = fopen("salas.txt", "a");
+    if (!f)
+    {
+        perror("guardar_sala_si_nueva fopen");
+        return;
+    }
+    fprintf(f, "%s\n", nombre);
+    fclose(f);
+}
+
+// Carfa las salas desde "salas.txt" al iniciar el servidor
+static void cargar_salas_desde_archivo(void)
+{
+    FILE *f = fopen("salas.txt", "r");
+    if (!f) return; // nada que cargar
+    char nombre[MAX_NOMBRE];
+    while (fgets(nombre, sizeof(nombre), f))
+    {
+        nombre[strcspn(nombre, "\r\n")] = '\0';
+        if (buscar_sala(nombre) >= 0)
+            continue; // ya cargada en runtime
+        // Crea si no existe. Usará tu esquema ftok basado en num_salas.
+        int id = crear_sala(nombre);
+        if (id >= 0)
+        {
+            // Cargadas desde disco arrancan "inactivas": 0 usuarios
+            salas[id].num_usuarios = 0;
+            // No guardes de nuevo al archivo (ya venía de archivo)
+        }
+    }
+    printf("Salas cargadas desde archivo: %d\n", num_salas);
+    fclose(f);
+}
+
 // Función para agregar un usuario a una sala
 int agregar_usuario(int indice_sala, const char *nombre_usuario, pid_t pid)
 {
@@ -151,6 +214,9 @@ int main()
     }
 
     printf("Servidor de chat iniciado. Esperando clientes...\n");
+    // Cargar salas desde archivo al iniciar
+    cargar_salas_desde_archivo();
+    
 
     struct mensaje msg;
 
@@ -174,6 +240,7 @@ int main()
                     printf("No se pudo crear la sala %s\n", msg.sala);
                     continue;
                 }
+                guardar_sala_si_nueva(msg.sala);
                 printf("Nueva sala creada: %s\n", msg.sala);
             }
 
@@ -210,30 +277,70 @@ int main()
         }
         else if (msg.mtype == MT_GLOBAL_SHOW && msg.cmd == CMD_SHOW)
         {
-            // Mostrar salas
             struct mensaje out = {0};
             out.mtype = msg.pid;
             out.cmd = CMD_INFO;
 
-            if (num_salas == 0)
+            int activas = 0;
+            for (int i = 0; i < num_salas; i++)
+                if (salas[i].num_usuarios > 0)
+                    activas++;
+
+            if (activas == 0)
             {
-                snprintf(out.texto, MAX_TEXTO, "No hay salas disponibles.");
+                snprintf(out.texto, MAX_TEXTO, "No hay salas activas.");
             }
             else
             {
-                printf("Listado de salas solicitado por PID %d\n", msg.pid);
+                printf("Enviando lista de salas activas a PID %d\n", msg.pid);
                 size_t offset = 0;
-                offset += snprintf(out.texto + offset, MAX_TEXTO - offset, "Salas disponibles:\n");
+                offset += snprintf(out.texto + offset, MAX_TEXTO - offset, "Salas activas:\n");
                 for (int i = 0; i < num_salas && offset < MAX_TEXTO; i++)
                 {
-                    offset += snprintf(out.texto + offset, MAX_TEXTO - offset, " - %s (%d usuarios)\n",
+                    if (salas[i].num_usuarios <= 0)
+                        continue;
+                    offset += snprintf(out.texto + offset, MAX_TEXTO - offset,
+                                       " - %s (%d usuarios)\n",
                                        salas[i].nombre, salas[i].num_usuarios);
                 }
+                out.texto[MAX_TEXTO - 1] = '\0';
             }
 
             if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
             {
                 perror("Error al enviar lista de salas");
+            }
+        }
+
+        else if (msg.mtype == MT_GLOBAL_SHOW_ALL && msg.cmd == CMD_SHOW_ALL)
+        {
+            struct mensaje out = {0};
+            out.mtype = msg.pid;
+            out.cmd = CMD_INFO;
+
+            // Mostramos TODAS las salas cargadas (tengan o no usuarios)
+            if (num_salas == 0)
+            {
+                snprintf(out.texto, MAX_TEXTO, "No hay salas registradas.");
+            }
+            else
+            {
+                printf("Enviando lista de todas las salas a PID %d\n", msg.pid);
+                size_t offset = 0;
+                offset += snprintf(out.texto + offset, MAX_TEXTO - offset,
+                                   "Salas registradas (todas):\n");
+                for (int i = 0; i < num_salas && offset < MAX_TEXTO; i++)
+                {
+                    offset += snprintf(out.texto + offset, MAX_TEXTO - offset,
+                                       " - %s (%d activos)\n",
+                                       salas[i].nombre, salas[i].num_usuarios);
+                }
+                out.texto[MAX_TEXTO - 1] = '\0';
+            }
+
+            if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1)
+            {
+                perror("Error al enviar lista de salas (all)");
             }
         }
     }

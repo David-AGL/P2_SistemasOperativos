@@ -14,12 +14,14 @@
 #define MT_GLOBAL_JOIN 1L
 #define MT_GLOBAL_SEND 3L
 #define MT_GLOBAL_SHOW 5L
+#define MT_GLOBAL_SHOW_ALL 7L
 
 // Comandos semánticos dentro del payload
 #define CMD_JOIN 1
 #define CMD_SEND 2
 #define CMD_SHOW 3
 #define CMD_INFO 4
+#define CMD_SHOW_ALL 8
 
 // Estructura para los mensajes
 struct mensaje
@@ -171,6 +173,35 @@ int main(int argc, char *argv[])
             {
                 // Por si el servidor respondiera otra cosa
                 printf("[show] Respuesta inesperada (cmd=%d)\n", resp.cmd);
+            }
+        }
+        else if (strcmp(comando, "show all") == 0)
+        {
+            struct mensaje req = {0};
+            req.mtype = MT_GLOBAL_SHOW_ALL; 
+            req.cmd = CMD_SHOW_ALL;        
+            req.pid = getpid();
+
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
+            {
+                perror("msgsnd show all");
+                continue;
+            }
+
+            struct mensaje resp = {0};
+            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
+            {
+                perror("msgrcv show all");
+                continue;
+            }
+
+            if (resp.cmd == CMD_INFO)
+            {
+                puts(resp.texto);
+            }
+            else
+            {
+                printf("[show all] Respuesta inesperada (cmd=%d)\n", resp.cmd);
             }
         }
         else if (strlen(comando) > 0)
