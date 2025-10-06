@@ -6,11 +6,12 @@
 #include <sys/msg.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
 
 #define MAX_TEXTO 256
 #define MAX_NOMBRE 50
 
-// Constantes de control para la COLA GLOBAL
+// MTYPES (cola global)
 #define MT_GLOBAL_JOIN 1L
 #define MT_GLOBAL_SEND 3L
 #define MT_GLOBAL_SHOW 5L
@@ -19,7 +20,7 @@
 #define MT_GLOBAL_SHOW_USERS 11L
 #define MT_GLOBAL_SHOW_ALL_USERS 13L
 
-// Comandos semánticos dentro del payload
+// COMANDOS
 #define CMD_JOIN 1
 #define CMD_SEND 2
 #define CMD_SHOW 3
@@ -30,74 +31,114 @@
 #define CMD_SHOW_USERS 11
 #define CMD_SHOW_ALL_USERS 13
 
-// Estructura para los mensajes
-struct mensaje
-{
-    long mtype;     // Tipo de mensaje
-    int cmd;        // CMD_JOIN / CMD_SEND
-    pid_t pid;      // PID del cliente
-    int client_qid; // (reservado si luego usas cola privada)
-    int sala_qid;   // qid de la sala (respuesta JOIN)
+struct mensaje {
+    long mtype;
+    int cmd;
+    pid_t pid;
+    int client_qid;
+    int sala_qid;
     char remitente[MAX_NOMBRE];
     char texto[MAX_TEXTO];
     char sala[MAX_NOMBRE];
 };
-
 #define MSGSIZE (sizeof(struct mensaje) - sizeof(long))
 
 int cola_global;
 int cola_sala = -1;
 char nombre_usuario[MAX_NOMBRE];
 char sala_actual[MAX_NOMBRE] = "";
+char sala_pendiente[MAX_NOMBRE] = "";
 
-// Función para el hilo que recibe mensajes
-void *recibir_mensajes(void *arg)
-{
+volatile sig_atomic_t bloqueo_global = 0;
+
+// --- procesa JOIN/INFO/LEAVE “no esperados” que llegan por GLOBAL ---
+static void manejar_notificacion_global(const struct mensaje *msg) {
+    if (!msg) return;
+
+    if (msg->cmd == CMD_INFO) {
+        puts(msg->texto);
+    } else if (msg->cmd == CMD_JOIN) {
+        // promoción o join-ok tardío
+        cola_sala = msg->sala_qid;
+        if (cola_sala == -1) {
+            fprintf(stderr, "[JOIN] qid de sala inválido\n");
+        } else {
+            if (msg->sala[0] != '\0') {
+                strcpy(sala_actual, msg->sala);
+            } else if (sala_pendiente[0] != '\0') {
+                strcpy(sala_actual, sala_pendiente);
+                sala_pendiente[0] = '\0';
+            }
+            printf("%s\n", msg->texto);
+        }
+    } else if (msg->cmd == CMD_LEAVE) {
+        puts(msg->texto);
+    }
+}
+
+// --- espera sincrónica de un CMD específico, consumiendo y manejando otros ---
+static int esperar_cmd_global(int cmd_esperado, struct mensaje *out) {
+    long filtro = (long)getpid();
+    struct mensaje tmp;
+
+    for (;;) {
+        if (msgrcv(cola_global, &tmp, MSGSIZE, filtro, 0) == -1) {
+            perror("msgrcv (esperar_cmd_global)");
+            return -1;
+        }
+        if (tmp.cmd == cmd_esperado) {
+            if (out) *out = tmp;
+            return 0;
+        }
+        // No era lo esperado → procesar como notificación asíncrona
+        manejar_notificacion_global(&tmp);
+        // y seguir esperando lo que sí esperamos
+    }
+}
+
+// --- hilo receptor: SALA y GLOBAL (cuando no hay espera sincrónica) ---
+void *recibir_mensajes(void *arg) {
     struct mensaje msg;
-    while (1)
-    {
-        if (cola_sala != -1)
-        {
-            long filtro = (long)getpid();
-            if (msgrcv(cola_sala, &msg, MSGSIZE, filtro, IPC_NOWAIT) == -1)
-            {
-                usleep(100000);
-                continue;
-            }
-            if (msg.cmd == CMD_SEND && strcmp(msg.remitente, nombre_usuario) != 0)
-            {
-                printf("%s: %s\n", msg.remitente, msg.texto);
-            }
-            if (msg.cmd == CMD_HISTORY)
-            {
-                // Mensaje de historial (no afecta tu sala actual, solo muestra contexto)
-                printf("(hist) %s: %s\n", msg.remitente, msg.texto);
-                continue;
+    long filtro = (long)getpid();
+
+    while (1) {
+        int hubo_algo = 0;
+
+        // 1) Cola de la sala: historial y chat
+        if (cola_sala != -1) {
+            while (msgrcv(cola_sala, &msg, MSGSIZE, filtro, IPC_NOWAIT) != -1) {
+                hubo_algo = 1;
+                if (msg.cmd == CMD_SEND && strcmp(msg.remitente, nombre_usuario) != 0) {
+                    printf("%s: %s\n", msg.remitente, msg.texto);
+                } else if (msg.cmd == CMD_HISTORY) {
+                    printf("(hist) %s: %s\n", msg.remitente, msg.texto);
+                }
             }
         }
-        else
-        {
-            usleep(200000); // pausa mas cuando no hay sala activ
+
+        // 2) Cola global: solo si no hay “bloqueo” por operación sincrónica
+        if (!bloqueo_global) {
+            while (msgrcv(cola_global, &msg, MSGSIZE, filtro, IPC_NOWAIT) != -1) {
+                hubo_algo = 1;
+                manejar_notificacion_global(&msg);
+            }
         }
+
+        if (!hubo_algo) usleep(100000);
     }
     return NULL;
 }
 
-int main(int argc, char *argv[])
-{
-    if (argc != 2)
-    {
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
         printf("Uso: %s <nombre_usuario>\n", argv[0]);
         exit(1);
     }
-
     strcpy(nombre_usuario, argv[1]);
 
-    // Conectarse a la cola global
     key_t key_global = ftok("/tmp", 'G');
     cola_global = msgget(key_global, 0666);
-    if (cola_global == -1)
-    {
+    if (cola_global == -1) {
         perror("Error al conectar a la cola global");
         exit(1);
     }
@@ -105,241 +146,226 @@ int main(int argc, char *argv[])
     printf("Bienvenido, %s. Usa <show> para ver las salas activas \n", nombre_usuario);
     printf("Usa <-help> para conocer los comandos y su uso \n");
 
-    // Crear un hilo para recibir mensajes
     pthread_t hilo_receptor;
     pthread_create(&hilo_receptor, NULL, recibir_mensajes, NULL);
 
     struct mensaje msg;
     char comando[MAX_TEXTO];
 
-    while (1)
-    {
+    while (1) {
         printf("> ");
-        fgets(comando, MAX_TEXTO, stdin);
-        comando[strcspn(comando, "\n")] = '\0'; // Eliminar el salto de línea
+        if (!fgets(comando, MAX_TEXTO, stdin)) break;
+        comando[strcspn(comando, "\n")] = '\0';
 
-        if (strncmp(comando, "join ", 5) == 0)
-        {
+        // JOIN
+        if (strncmp(comando, "join ", 5) == 0) {
             char sala[MAX_NOMBRE];
             sscanf(comando, "join %s", sala);
-            if (strlen(sala_actual) > 0 && cola_sala != -1) // Warning para evitar join  de otra sala estando en una
-            {
-                printf("Ya estás en la sala '%s'. Usa 'leave %s' primero antes de unirte a otra sala.\n",
-                       sala_actual, sala_actual);
+
+            if (strlen(sala_actual) > 0 && cola_sala != -1) {
+                printf("Ya estás en la sala '%s'. Usa 'leave %s' primero.\n", sala_actual, sala_actual);
                 continue;
             }
 
-            struct mensaje msg = {0};
-            msg.mtype = MT_GLOBAL_JOIN; // 1
-            msg.cmd = CMD_JOIN;
-            msg.pid = getpid();
-            strcpy(msg.remitente, nombre_usuario);
-            strcpy(msg.sala, sala);
+            struct mensaje req = {0};
+            req.mtype = MT_GLOBAL_JOIN;
+            req.cmd   = CMD_JOIN;
+            req.pid   = getpid();
+            strcpy(req.remitente, nombre_usuario);
+            strcpy(req.sala, sala);
 
-            if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1)
-            {
+            bloqueo_global = 1;
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1) {
+                bloqueo_global = 0;
                 perror("Error al enviar solicitud de JOIN");
                 continue;
             }
 
-            // Esperar confirmación dirigida: mtype = mi PID
-            if (msgrcv(cola_global, &msg, MSGSIZE, (long)getpid(), 0) == -1)
-            {
-                perror("Error al recibir confirmación");
+            struct mensaje resp = {0};
+            if (esperar_cmd_global(CMD_JOIN, &resp) == -1) {
+                bloqueo_global = 0;
                 continue;
             }
+            bloqueo_global = 0;
 
-            printf("%s\n", msg.texto);
-
-            // El servidor nos da el qid de la sala
-            cola_sala = msg.sala_qid;
-            if (cola_sala == -1)
-            {
+            // Puede ser JOIN OK inmediato o promoción que llegó al toque.
+            // Si la promoción ya fue procesada por manejar_notificacion_global(),
+            // resp contendrá ese JOIN. En ambos casos seteamos estado.
+            printf("%s\n", resp.texto);
+            cola_sala = resp.sala_qid;
+            if (cola_sala == -1) {
                 fprintf(stderr, "Error: qid de sala inválido\n");
                 continue;
             }
-            strcpy(sala_actual, sala);
+            if (resp.sala[0] != '\0') strcpy(sala_actual, resp.sala);
+            else                       strcpy(sala_actual, sala);
+            sala_pendiente[0] = '\0';
+            continue;
         }
-        else if (strcmp(comando, "show") == 0)
-        {
-            // Enviar petición SHOW por la cola global
-            struct mensaje req = {0};
-            req.mtype = MT_GLOBAL_SHOW; // mtype que usas para 'show'
-            req.cmd = CMD_SHOW;         // comando 'show'
-            req.pid = getpid();         // para que el servidor responda a tu PID
 
-            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
-            {
+        // SHOW
+        else if (strcmp(comando, "show") == 0) {
+            struct mensaje req = {0};
+            req.mtype = MT_GLOBAL_SHOW;
+            req.cmd   = CMD_SHOW;
+            req.pid   = getpid();
+
+            bloqueo_global = 1;
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1) {
+                bloqueo_global = 0;
                 perror("msgsnd show");
                 continue;
             }
-
-            // Esperar la respuesta informativa dirigida a mí (mtype = mi PID)
             struct mensaje resp = {0};
-            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
-            {
-                perror("msgrcv show");
+            if (esperar_cmd_global(CMD_INFO, &resp) == -1) {
+                bloqueo_global = 0;
                 continue;
             }
+            bloqueo_global = 0;
 
-            // El servidor debe responder con CMD_INFO y el listado en 'texto'
-            if (resp.cmd == CMD_INFO)
-            {
-                puts(resp.texto);
-            }
-            else
-            {
-                // Por si el servidor respondiera otra cosa
-                printf("[show] Respuesta inesperada (cmd=%d)\n", resp.cmd);
-            }
+            puts(resp.texto);
         }
-        else if (strcmp(comando, "show all") == 0)
-        {
+
+        // SHOW ALL
+        else if (strcmp(comando, "show all") == 0) {
             struct mensaje req = {0};
             req.mtype = MT_GLOBAL_SHOW_ALL;
-            req.cmd = CMD_SHOW_ALL;
-            req.pid = getpid();
+            req.cmd   = CMD_SHOW_ALL;
+            req.pid   = getpid();
 
-            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
-            {
+            bloqueo_global = 1;
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1) {
+                bloqueo_global = 0;
                 perror("msgsnd show all");
                 continue;
             }
-
             struct mensaje resp = {0};
-            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
-            {
-                perror("msgrcv show all");
+            if (esperar_cmd_global(CMD_INFO, &resp) == -1) {
+                bloqueo_global = 0;
                 continue;
             }
+            bloqueo_global = 0;
 
-            if (resp.cmd == CMD_INFO)
-            {
-                puts(resp.texto);
-            }
-            else
-            {
-                printf("[show all] Respuesta inesperada (cmd=%d)\n", resp.cmd);
-            }
+            puts(resp.texto);
         }
-        else if (strncmp(comando, "leave ", 6) == 0)
-        {
+
+        // LEAVE
+        else if (strncmp(comando, "leave ", 6) == 0) {
             char sala[MAX_NOMBRE];
             sscanf(comando, "leave %s", sala);
-            if (strlen(sala) == 0)
-            {
+            if (strlen(sala) == 0) {
                 printf("Uso: leave <nombre_sala>\n");
                 continue;
             }
 
             struct mensaje req = {0};
             req.mtype = MT_GLOBAL_LEAVE;
-            req.cmd = CMD_LEAVE;
-            req.pid = getpid();
+            req.cmd   = CMD_LEAVE;
+            req.pid   = getpid();
             strcpy(req.remitente, nombre_usuario);
             strcpy(req.sala, sala);
 
-            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
-            {
+            bloqueo_global = 1;
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1) {
+                bloqueo_global = 0;
                 perror("Error al enviar solicitud de LEAVE");
                 continue;
             }
             struct mensaje resp = {0};
-            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
-            {
-                perror("Error al recibir confirmación de LEAVE");
+            if (esperar_cmd_global(CMD_LEAVE, &resp) == -1) {
+                bloqueo_global = 0;
                 continue;
             }
+            bloqueo_global = 0;
 
             printf("%s\n", resp.texto);
-            if (strcmp(sala, sala_actual) == 0)
-            {
+            if (strcmp(sala, sala_actual) == 0) {
                 cola_sala = -1;
-                strcpy(sala_actual, "");
+                sala_actual[0] = '\0';
             }
         }
-        else if (strcmp(comando, "-help") == 0)
-        {
-            printf(" - join <nombreSala>: Entrar a una sala en específico (crea una sala si no existe)\n"
-                   " - leave <nombreSala>: Salir de una sala y volver al lobby \n"
-                   " - show: Muestra las salas activas (creadas en la sesión) \n"
-                   " - show all: Muestra todas las salas que han sido creadas y están guardadas \n"
-                   " - show users: Muesrta los usuarios en ese canal \n"
-                   " - show all users: Muestra todos los usuarios de todos los canales \n");
+
+        // HELP
+        else if (strcmp(comando, "-help") == 0) {
+            printf(" - join <sala>: Entrar a una sala (si está llena, quedas en espera)\n"
+                   " - leave <sala>: Salir de una sala\n"
+                   " - show: Muestra las salas activas\n"
+                   " - show all: Muestra todas las salas registradas\n"
+                   " - show users: Muestra los usuarios de tu sala actual\n"
+                   " - show all users: Muestra los usuarios de todas las salas\n");
         }
-        else if (strcmp(comando, "show users") == 0)
-        {
-            // si NO estás en sala, feedback local y ya (sin pedir al server)
-            if (cola_sala == -1 || sala_actual[0] == '\0')
-            {
+
+        // SHOW USERS
+        else if (strcmp(comando, "show users") == 0) {
+            if (cola_sala == -1 || sala_actual[0] == '\0') {
                 printf("No estás en ninguna sala. Usa 'join <sala>'.\n");
                 continue;
             }
 
             struct mensaje req = {0};
-            req.mtype = MT_GLOBAL_SHOW_USERS; // canal de control
-            req.cmd = CMD_SHOW_USERS;
-            req.pid = getpid();
+            req.mtype = MT_GLOBAL_SHOW_USERS;
+            req.cmd   = CMD_SHOW_USERS;
+            req.pid   = getpid();
             strcpy(req.remitente, nombre_usuario);
 
-            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
-            {
+            bloqueo_global = 1;
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1) {
+                bloqueo_global = 0;
                 perror("Error al pedir lista de usuarios");
                 continue;
             }
-
             struct mensaje resp = {0};
-            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
-            {
-                perror("Error al recibir lista de usuarios");
+            if (esperar_cmd_global(CMD_SHOW_USERS, &resp) == -1) {
+                bloqueo_global = 0;
                 continue;
             }
-            // El server trae el texto listo
-            printf("%s\n", resp.texto);
-            continue;
-        } // --- comando: show all users ---
-        else if (strcmp(comando, "show all users") == 0)
-        {
-            struct mensaje req = {0};
-            req.mtype = MT_GLOBAL_SHOW_ALL_USERS; // canal de control
-            req.cmd = CMD_SHOW_ALL_USERS;
-            req.pid = getpid();
-            strcpy(req.remitente, nombre_usuario);
+            bloqueo_global = 0;
 
-            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
-            {
-                perror("Error al pedir lista global");
-                continue;
-            }
-
-            struct mensaje resp = {0};
-            if (msgrcv(cola_global, &resp, MSGSIZE, (long)getpid(), 0) == -1)
-            {
-                perror("Error al recibir lista global");
-                continue;
-            }
             printf("%s\n", resp.texto);
             continue;
         }
 
-        else if (strlen(comando) > 0)
-        {
-            if (strlen(sala_actual) == 0 || cola_sala == -1)
-            {
+        // SHOW ALL USERS
+        else if (strcmp(comando, "show all users") == 0) {
+            struct mensaje req = {0};
+            req.mtype = MT_GLOBAL_SHOW_ALL_USERS;
+            req.cmd   = CMD_SHOW_ALL_USERS;
+            req.pid   = getpid();
+            strcpy(req.remitente, nombre_usuario);
+
+            bloqueo_global = 1;
+            if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1) {
+                bloqueo_global = 0;
+                perror("Error al pedir lista global");
+                continue;
+            }
+            struct mensaje resp = {0};
+            if (esperar_cmd_global(CMD_SHOW_ALL_USERS, &resp) == -1) {
+                bloqueo_global = 0;
+                continue;
+            }
+            bloqueo_global = 0;
+
+            printf("%s\n", resp.texto);
+            continue;
+        }
+
+        // MENSAJE AL CANAL
+        else if (strlen(comando) > 0) {
+            if (sala_actual[0] == '\0' || cola_sala == -1) {
                 printf("No estás en ninguna sala. Usa 'join <sala>' para unirte a una.\n");
                 continue;
             }
 
-            struct mensaje msg = {0};
-            msg.mtype = MT_GLOBAL_SEND;
-            msg.cmd = CMD_SEND;
-            msg.pid = getpid();
-            strcpy(msg.remitente, nombre_usuario);
-            strcpy(msg.sala, sala_actual);
-            strcpy(msg.texto, comando);
+            struct mensaje out = {0};
+            out.mtype = MT_GLOBAL_SEND;
+            out.cmd   = CMD_SEND;
+            out.pid   = getpid();
+            strcpy(out.remitente, nombre_usuario);
+            strcpy(out.sala, sala_actual);
+            strcpy(out.texto, comando);
 
-            if (msgsnd(cola_global, &msg, MSGSIZE, 0) == -1)
-            {
+            if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1) {
                 perror("Error al enviar mensaje");
                 continue;
             }
