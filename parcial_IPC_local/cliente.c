@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    printf("Bienvenido, %s. Usa <show> para ver las salas activas \n", nombre_usuario);
+    printf("Bienvenido, %s. Usa <show rooms> para ver las salas activas \n", nombre_usuario);
     printf("Usa <-help> para conocer los comandos y su uso \n");
 
     pthread_t hilo_receptor;
@@ -203,8 +203,8 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // SHOW
-        else if (strcmp(comando, "show") == 0) {
+        // SHOW ROOMS
+        else if (strcmp(comando, "show rooms") == 0) {
             struct mensaje req = {0};
             req.mtype = MT_GLOBAL_SHOW;
             req.cmd   = CMD_SHOW;
@@ -227,7 +227,7 @@ int main(int argc, char *argv[]) {
         }
 
         // SHOW ALL
-        else if (strcmp(comando, "show all") == 0) {
+        else if (strcmp(comando, "show all rooms") == 0) {
             struct mensaje req = {0};
             req.mtype = MT_GLOBAL_SHOW_ALL;
             req.cmd   = CMD_SHOW_ALL;
@@ -289,8 +289,8 @@ int main(int argc, char *argv[]) {
         else if (strcmp(comando, "-help") == 0) {
             printf(" - join <sala>: Entrar a una sala (si está llena, quedas en espera)\n"
                    " - leave <sala>: Salir de una sala\n"
-                   " - show: Muestra las salas activas\n"
-                   " - show all: Muestra todas las salas registradas\n"
+                   " - show rooms: Muestra las salas activas\n"
+                   " - show all rooms: Muestra todas las salas registradas\n"
                    " - show users: Muestra los usuarios de tu sala actual\n"
                    " - show all users: Muestra los usuarios de todas las salas\n");
         }
