@@ -346,6 +346,24 @@ void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const
     }
 }
 
+void notificar_sala_excluyendo(int indice_sala, const char *nombre_excluir, const char *remitente_mostrar, const char *texto) {
+    if (indice_sala < 0 || indice_sala >= num_salas) return;
+    struct sala *s = &salas[indice_sala];
+
+    for (int i = 0; i < s->num_usuarios; i++) {
+        if (strcmp(s->usuarios[i].nombre, nombre_excluir) == 0) continue;
+
+        struct mensaje out = {0};
+        out.mtype = (long)s->usuarios[i].pid;
+        out.cmd   = CMD_SEND;
+        strncpy(out.remitente, remitente_mostrar ? remitente_mostrar : "", MAX_NOMBRE-1);
+        strncpy(out.texto, texto ? texto : "", MAX_TEXTO-1);
+
+        if (msgsnd(s->cola_id, &out, MSGSIZE, 0) == -1)
+            perror("Error al notificar a la sala");
+    }
+}
+
 static int encontrar_sala_por_pid(pid_t pid_busca) {
     for (int i = 0; i < num_salas; i++)
         for (int j = 0; j < salas[i].num_usuarios; j++)
@@ -430,6 +448,10 @@ int main() {
                 strncpy(out.sala, salas[indice_sala].nombre, sizeof(out.sala)-1);
                 snprintf(out.texto, MAX_TEXTO, "Te has unido a la sala: %s", msg.sala);
                 if (msgsnd(cola_global, &out, MSGSIZE, 0) == -1) perror("Error al enviar confirmación");
+                // --- avisar a los demás que <usuario> se unió (excluye al que entró)
+                char mensaje_sistema[MAX_TEXTO];
+                snprintf(mensaje_sistema, MAX_TEXTO, "[%s] se unió a la sala.", msg.remitente);
+                notificar_sala_excluyendo(indice_sala, msg.remitente, "", mensaje_sistema);
 
                 // 2) Historial -> cola de la sala
                 enviar_historial_ultimos(msg.sala, salas[indice_sala].cola_id, msg.pid, 10);
@@ -574,6 +596,11 @@ int main() {
                                 // 2) Historial por cola de sala
                                 enviar_historial_ultimos(salas[indice_sala].nombre,
                                                          salas[indice_sala].cola_id, pid_next, 10);
+
+                                // --- avisar a los demás que <nombre_next> se unió por promoción
+                                char mensaje_sistema[MAX_TEXTO];
+                                snprintf(mensaje_sistema, MAX_TEXTO, "[%s] se unió a la sala.", msg.remitente);
+                                notificar_sala_excluyendo(indice_sala, msg.remitente, "", mensaje_sistema);
 
                                 printf("Promovido: %s (PID %d) a sala %s (%d/%d)\n",
                                        nombre_next, (int)pid_next,
