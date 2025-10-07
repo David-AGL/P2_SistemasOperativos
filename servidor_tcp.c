@@ -28,6 +28,9 @@
 #define ROOMS_FILE "salas.txt"
 #define LOG_DIR    "logs"
 
+/* forward declaration for sendf so functions that send can call it */
+static void sendf(int fd, const char* fmt, ...);
+
 /* ========== util logs/ndjson (igual que tu versión) ========== */
 static void ensure_log_dir(void){
     struct stat st; if (stat(LOG_DIR,&st)==-1) { if (mkdir(LOG_DIR,0700)==-1) perror("mkdir logs"); }
@@ -94,24 +97,25 @@ static void send_history_lastN(int cfd, const char* sala, int N){
     free(line); fclose(f);
     size_t start=(cnt==(size_t)N)? i:0;
     for(size_t k=0;k<cnt;k++){
-        const char* jsonl=ring[(start+k)%N]; if(!jsonl) continue;
-        char from[MAX_NOMBRE]={0}, text[MAX_TEXTO]={0};
-        extract_from_text(jsonl,from,sizeof from,text,sizeof text);
-        dprintf(cfd,"FROM %s %s %s\n", sala, from, text);
+    const char* jsonl=ring[(start+k)%N]; if(!jsonl) continue;
+    char from[MAX_NOMBRE]={0}, text[MAX_TEXTO]={0};
+    extract_from_text(jsonl,from,sizeof from,text,sizeof text);
+    // Use sendf (which uses send()) to ensure consistent socket writes
+    sendf(cfd, "FROM %s %s %s\n", sala, from, text);
     }
     for(size_t k=0;k<cnt;k++) free(ring[k]); free(ring);
 }
 
-/* ========== estructuras de salas (idéntica semántica) ========== */
+/* ========== estructuras de salas (completa como IPC) ========== */
 struct usuario { int fd; char nombre[MAX_NOMBRE]; };
 struct sala {
     char nombre[MAX_NOMBRE];
     int  num_usuarios;
     struct usuario usuarios[MAX_USUARIOS_POR_SALA];
-    int  capacidad; // nuevo campo en tu sysv mejorado
-    // cola de espera FIFO
-    pid_t espera_fds[MAX_USUARIOS_POR_SALA*2];
-    char   espera_nombres[MAX_USUARIOS_POR_SALA*2][MAX_NOMBRE];
+    int  capacidad;
+    // cola de espera FIFO (adaptada del IPC)
+    int espera_fds[MAX_USUARIOS_POR_SALA*2];
+    char espera_nombres[MAX_USUARIOS_POR_SALA*2][MAX_NOMBRE];
     int espera_ini, espera_fin, espera_len;
 };
 static struct sala salas[MAX_SALAS];
@@ -156,36 +160,58 @@ static int sala_remove_usuario(int idx, int fd){
     }
     return -1;
 }
-static void sala_enqueue_espera(int idx, int fd, const char* nombre){
+// Funciones de cola de espera 
+static int sala_enqueue_espera(int idx, int fd, const char* nombre){
+    if(idx<0||idx>=num_salas) return -1;
     struct sala *s=&salas[idx];
     // evitar duplicado
     for(int k=0;k<s->espera_len;k++){
         int pos=(s->espera_ini+k)%(MAX_USUARIOS_POR_SALA*2);
-        if(s->espera_fds[pos]==fd) return;
+        if(s->espera_fds[pos]==fd) return 0; // ya estaba
     }
-    if(s->espera_len >= (MAX_USUARIOS_POR_SALA*2)) return;
+    if(s->espera_len >= (MAX_USUARIOS_POR_SALA*2)) return -1; // overflow
     s->espera_fds[s->espera_fin]=fd;
-    strncpy(s->espera_nombres[s->espera_fin], nombre, MAX_NOMBRE);
+    strncpy(s->espera_nombres[s->espera_fin], nombre, MAX_NOMBRE-1);
+    s->espera_nombres[s->espera_fin][MAX_NOMBRE-1] = '\0';
     s->espera_fin = (s->espera_fin+1)%(MAX_USUARIOS_POR_SALA*2);
     s->espera_len++;
+    return s->espera_len; // retorna posición en cola
 }
+
 static int sala_dequeue_espera(int idx, int* out_fd, char* out_nombre){
+    if(idx<0||idx>=num_salas) return 0;
     struct sala *s=&salas[idx];
     if(s->espera_len==0) return 0;
-    *out_fd = s->espera_fds[s->espera_ini];
-    strncpy(out_nombre, s->espera_nombres[s->espera_ini], MAX_NOMBRE);
+    if(out_fd) *out_fd = s->espera_fds[s->espera_ini];
+    if(out_nombre) {
+        strncpy(out_nombre, s->espera_nombres[s->espera_ini], MAX_NOMBRE-1);
+        out_nombre[MAX_NOMBRE-1] = '\0';
+    }
     s->espera_ini = (s->espera_ini+1)%(MAX_USUARIOS_POR_SALA*2);
     s->espera_len--;
-    return 1;
+    return 1; 
 }
+
+static int sala_ya_en_espera(int idx, int fd){
+    if(idx<0||idx>=num_salas) return 0;
+    struct sala *s=&salas[idx];
+    for(int k=0;k<s->espera_len;k++){
+        int pos=(s->espera_ini+k)%(MAX_USUARIOS_POR_SALA*2);
+        if(s->espera_fds[pos]==fd) return 1;
+    }
+    return 0;
+}
+
 static int sala_pos_espera(int idx, int fd){
-    struct sala *s=&salas[idx]; int pos=0;
+    if(idx<0||idx>=num_salas) return -1;
+    struct sala *s=&salas[idx]; 
+    int pos=0;
     for(int k=0;k<s->espera_len;k++){
         int p=(s->espera_ini+k)%(MAX_USUARIOS_POR_SALA*2);
         pos++;
         if(s->espera_fds[p]==fd) return pos;
     }
-    return -1;
+    return -1; // no encontrado
 }
 
 /* ========== clientes conectados ========== */
@@ -218,15 +244,72 @@ static int room_count_idx(int idx){
     if(idx<0||idx>=num_salas) return 0; return salas[idx].num_usuarios;
 }
 
+// Función para remover de cola de espera cuando cliente se desconecta
+static void remove_from_all_wait_queues(int fd){
+    for(int sala_idx = 0; sala_idx < num_salas; sala_idx++){
+        struct sala *s = &salas[sala_idx];
+        for(int k = 0; k < s->espera_len; k++){
+            int pos = (s->espera_ini + k) % (MAX_USUARIOS_POR_SALA*2);
+            if(s->espera_fds[pos] == fd){
+                // Encontrado, remover desplazando el resto
+                for(int j = k; j < s->espera_len - 1; j++){
+                    int curr_pos = (s->espera_ini + j) % (MAX_USUARIOS_POR_SALA*2);
+                    int next_pos = (s->espera_ini + j + 1) % (MAX_USUARIOS_POR_SALA*2);
+                    s->espera_fds[curr_pos] = s->espera_fds[next_pos];
+                    strncpy(s->espera_nombres[curr_pos], s->espera_nombres[next_pos], MAX_NOMBRE);
+                }
+                s->espera_len--;
+                s->espera_fin = (s->espera_fin - 1 + (MAX_USUARIOS_POR_SALA*2)) % (MAX_USUARIOS_POR_SALA*2);
+                printf("Cliente fd=%d removido de cola de espera de sala %s\n", fd, s->nombre);
+                break;
+            }
+        }
+    }
+}
 static void try_promote_from_wait(int idx_sala){
+    if(idx_sala<0||idx_sala>=num_salas) return;
     struct sala *s=&salas[idx_sala];
-    if (s->num_usuarios >= s->capacidad) return;
-    int wfd=-1; char wname[MAX_NOMBRE]={0};
-    if (!sala_dequeue_espera(idx_sala, &wfd, wname)) return;
-    if (sala_add_usuario_cap(idx_sala, wname, wfd) == 1) {
-        sendf(wfd, "Ya hay cupo, entraste a la sala: %s\n", s->nombre);
-        send_history_lastN(wfd, s->nombre, HISTORY_N);
-        enviar_a_sala_menos_remitente(idx_sala, wfd, "", "nuevo usuario entró");
+    
+    // mientras haya cupo y gente esperando
+    while(s->num_usuarios < s->capacidad && s->espera_len > 0) {
+        int wfd=-1; 
+        char wname[MAX_NOMBRE]={0};
+        
+        if (!sala_dequeue_espera(idx_sala, &wfd, wname)) break;
+
+        int cliente_idx = -1;
+        for(int i=0; i<MAX_CLIENTS; i++){
+            if(clients[i].fd == wfd){
+                cliente_idx = i;
+                break;
+            }
+        }
+        
+        if(cliente_idx == -1) {
+            printf("Cliente en espera (fd=%d) desconectado, promoviendo siguiente...\n", wfd);
+            continue;
+        }
+        
+        // Intentar agregar a la sala
+        if (sala_add_usuario_cap(idx_sala, wname, wfd) == 1) {
+            // actualiza estado del cliente promovido
+            clients[cliente_idx].joined = 1;
+            clients[cliente_idx].sala_idx = idx_sala;
+            strncpy(clients[cliente_idx].nombre, wname, MAX_NOMBRE-1);
+            clients[cliente_idx].nombre[MAX_NOMBRE-1] = '\0';
+            
+            sendf(wfd, "Ya hay cupo en '%s'. Te unimos a la sala.\n", s->nombre);
+            send_history_lastN(wfd, s->nombre, HISTORY_N);
+            
+            // Notif a los otros en la sala
+            enviar_a_sala_menos_remitente(idx_sala, wfd, "", "nuevo usuario entró desde cola de espera");
+            
+            printf("Promovido: %s (fd %d) a sala %s (%d/%d)\n", wname, wfd, s->nombre, s->num_usuarios, s->capacidad);
+        } else {
+            // Si no se pudo agregar entonces reencolar al inicio
+            printf("Error al promover usuario %s, sala llena inesperadamente\n", wname);
+            break;
+        }
     }
 }
 
@@ -255,7 +338,7 @@ int main(int argc, char** argv){
                 if(slot==-1){ close(cfd); }
                 else{
                     clients[slot].fd=cfd; clients[slot].joined=0; clients[slot].nombre[0]='\0'; clients[slot].sala_idx=-1;
-                    sendf(cfd, "OK Bienvenido. Usa: join <sala> <usuario>\n");
+                    sendf(cfd, "OK Bienvenido.\n");
                 }
             }
         }
@@ -264,13 +347,25 @@ int main(int argc, char** argv){
             int fd=clients[i].fd; if(fd==-1) continue; if(!FD_ISSET(fd,&r)) continue;
             ssize_t n=recv(fd,buf,sizeof(buf)-1,0);
             if(n<=0){
+                // Cliente desconectado
+                printf("Cliente fd=%d (%s) desconectado\n", fd, clients[i].nombre);
+                
                 if(clients[i].joined){
                     int idx = clients[i].sala_idx;
                     enviar_a_sala_menos_remitente(idx, fd, "", "usuario salió");
                     sala_remove_usuario(idx, fd);
                     try_promote_from_wait(idx);
                 }
-                close(fd); clients[i].fd=-1; clients[i].joined=0; clients[i].sala_idx=-1; continue;
+                
+                // Remover de todas las colas de espera
+                remove_from_all_wait_queues(fd);
+                
+                close(fd); 
+                clients[i].fd=-1; 
+                clients[i].joined=0; 
+                clients[i].sala_idx=-1;
+                clients[i].nombre[0] = '\0';
+                continue;
             }
             buf[n]='\0';
 
@@ -282,46 +377,114 @@ int main(int argc, char** argv){
                     char cmd[16]={0}; sscanf(s,"%15s",cmd);
                     for(char* p=cmd; *p; ++p) *p=tolower((unsigned char)*p);
 
+                    /* Si el cliente aún no tiene nombre, tratar la primera línea que envía
+                       como su nombre de usuario (autologin desde argumento del cliente). */
+                    if(clients[i].nombre[0] == '\0'){
+                        char namebuf[MAX_NOMBRE];
+                        // copiar la línea completa y recortar espacios
+                        strncpy(namebuf, s, MAX_NOMBRE-1); namebuf[MAX_NOMBRE-1] = '\0';
+                        char *start = namebuf; while(*start && isspace((unsigned char)*start)) start++;
+                        // trim trailing
+                        char *end = start + strlen(start) - 1; while(end > start && isspace((unsigned char)*end)) *end-- = '\0';
+                        if(strlen(start) > 0){
+                            strncpy(clients[i].nombre, start, MAX_NOMBRE-1);
+                            clients[i].nombre[MAX_NOMBRE-1] = '\0';
+                            printf("Cliente fd=%d registró nombre '%s'\n", fd, clients[i].nombre);
+                        }
+                        s = e+1; while(*s=='\r'||*s=='\n') s++;
+                        continue;
+                    }
                     if(strcmp(cmd,"join")==0){
-                        char sala[MAX_NOMBRE]={0}, user[MAX_NOMBRE]={0};
-                        if(sscanf(s+5,"%49s %49s", sala, user)!=2){
-                            sendf(fd, "ERR uso: join <sala> <usuario>\n");
+                        char sala[MAX_NOMBRE]={0};
+                        if(sscanf(s+5,"%49s", sala)!=1 || strlen(sala)==0){
+                            sendf(fd, "ERR uso: join <sala>\n");
                         } else {
+                            // Verificar si ya está en otra sala
+                            if(clients[i].joined){
+                                sendf(fd, "Ya estás en la sala '%s'. Usa 'leave' primero.\n", salas[clients[i].sala_idx].nombre);
+                                s=e+1; while(*s=='\r'||*s=='\n') s++; continue;
+                            }
+                            const char* user = clients[i].nombre;
+                            if(strlen(user) == 0){
+                                sendf(fd, "ERR primero establece tu usuario con: user <nombre>\n");
+                                s=e+1; while(*s=='\r'||*s=='\n') s++; continue;
+                            }
                             int idx = buscar_sala(sala);
+                            if(idx >= 0 && sala_ya_en_espera(idx, fd)){
+                                sendf(fd, "Sala '%s' ocupada. Sigues en espera. Te avisaremos cuando haya cupo.\n", sala);
+                                s=e+1; while(*s=='\r'||*s=='\n') s++; continue;
+                            }
+                            
+                            // Crear sala si no existe
                             if (idx==-1){
                                 idx = crear_sala(sala);
-                                if (idx==-1){ sendf(fd,"No se pudo crear la sala %s\n", sala); s=e+1; while(*s=='\r'||*s=='\n') s++; continue; }
+                                if (idx==-1){ 
+                                    sendf(fd,"No se pudo crear la sala %s\n", sala); 
+                                    s=e+1; while(*s=='\r'||*s=='\n') s++; continue; 
+                                }
                                 rooms_file_add_if_new(sala);
                                 printf("Nueva sala creada: %s\n", sala);
                             }
+                            
                             int r = sala_add_usuario_cap(idx, user, fd);
                             if (r==1){
-                                clients[i].joined=1; clients[i].sala_idx=idx; strncpy(clients[i].nombre, user, MAX_NOMBRE);
+                                // Entrada exitosa
+                                clients[i].joined=1; 
+                                clients[i].sala_idx=idx;
                                 sendf(fd, "Te has unido a la sala: %s\n", sala);
                                 send_history_lastN(fd, sala, HISTORY_N);
-                                // avisar a otros
                                 enviar_a_sala_menos_remitente(idx, fd, "", "nuevo usuario entró");
+                                printf("Usuario %s se unió a la sala %s\n", user, sala);
                             } else if (r==-2){
-                                // llena: a espera
-                                sala_enqueue_espera(idx, fd, user);
-                                int pos = sala_pos_espera(idx, fd);
-                                sendf(fd, "Sala llena. Quedaste en espera (%d)\n", (pos>0)?pos:1);
+
+                                int queue_result = sala_enqueue_espera(idx, fd, user);
+                                if(queue_result > 0){
+                                    sendf(fd, "Sala '%s' ocupada. Quedaste en espera (pos=%d). Te avisaremos cuando haya cupo.\n", 
+                                          sala, queue_result);
+                                    printf("Sala '%s' llena. %s queda en espera (pos=%d)\n", sala, user, queue_result);
+                                } else {
+                                    sendf(fd, "Sala '%s' está llena y la cola de espera también está completa. Intenta más tarde.\n", sala);
+                                }
                             } else if (r==0){
-                                sendf(fd, "Te has unido a la sala: %s\n", sala); // ya estaba
+                                // Ya estaba en la sala
+                                clients[i].joined=1; 
+                                clients[i].sala_idx=idx;
+                                sendf(fd, "Ya estás en la sala: %s\n", sala);
+                                send_history_lastN(fd, sala, HISTORY_N);
                             } else {
                                 sendf(fd, "Error al unirte a la sala %s\n", sala);
                             }
                         }
                     }
                     else if(strcmp(cmd,"leave")==0){
-                        if(!clients[i].joined){ sendf(fd, "ERR no estás en sala\n"); }
-                        else {
+                        char sala_especificada[MAX_NOMBRE]={0};
+                        if(sscanf(s+6,"%49s", sala_especificada) != 1 || strlen(sala_especificada) == 0){
+                            sendf(fd, "ERR uso: leave <sala>\n");
+                            s=e+1; while(*s=='\r'||*s=='\n') s++; continue;
+                        }
+
+                        if(!clients[i].joined){ 
+                            sendf(fd, "No estás en ninguna sala.\n"); 
+                        } else {
                             int idx=clients[i].sala_idx;
-                            char sala[MAX_NOMBRE]; strcpy(sala, salas[idx].nombre);
+                            char sala_actual[MAX_NOMBRE]; 
+                            strcpy(sala_actual, salas[idx].nombre);
+                            
+                            // Validar que coincida
+                            if(strcmp(sala_especificada, sala_actual) != 0){
+                                sendf(fd, "No estás en la sala '%s'. Estás en '%s'. Usa 'leave %s'.\n", 
+                                      sala_especificada, sala_actual, sala_actual);
+                                s=e+1; while(*s=='\r'||*s=='\n') s++; continue;
+                            }
+                            
+                            // Salir de la sala
                             enviar_a_sala_menos_remitente(idx, fd, "", "usuario salió");
                             sala_remove_usuario(idx, fd);
-                            clients[i].joined=0; clients[i].sala_idx=-1; clients[i].nombre[0]='\0';
-                            sendf(fd, "Has salido de la sala: %s\n", sala);
+                            clients[i].joined=0; 
+                            clients[i].sala_idx=-1;
+                            sendf(fd, "Has salido de la sala: %s\n", sala_actual);
+                            printf("Usuario %s salió de la sala %s\n", clients[i].nombre, sala_actual);
+                            
                             try_promote_from_wait(idx);
                         }
                     }
@@ -370,19 +533,46 @@ int main(int argc, char** argv){
                         int printed=0; sendf(fd,"Salas activas:\n");
                         for(int a=0;a<num_salas;a++){
                             if(salas[a].num_usuarios>0){
-                                sendf(fd," - %s (%d usuarios)\n", salas[a].nombre, salas[a].num_usuarios);
+                                sendf(fd," - %s (%d/%d usuarios", salas[a].nombre, salas[a].num_usuarios, salas[a].capacidad);
+                                if(salas[a].espera_len > 0){
+                                    sendf(fd, ", %d en espera", salas[a].espera_len);
+                                }
+                                sendf(fd, ")\n");
                                 printed=1;
                             }
                         }
                         if(!printed) sendf(fd,"(ninguna)\n");
                     }
+                    else if (strcasecmp(s,"status")==0 || strcasecmp(s,"estado")==0){
+                        if(clients[i].joined){
+                            sendf(fd,"Estado: En sala '%s'\n", salas[clients[i].sala_idx].nombre);
+                        } else {
+                            // Verificar si está en alguna cola de espera
+                            int en_espera = 0;
+                            for(int sala_idx = 0; sala_idx < num_salas && !en_espera; sala_idx++){
+                                int pos = sala_pos_espera(sala_idx, fd);
+                                if(pos > 0){
+                                    sendf(fd,"Estado: En cola de espera para sala '%s' (posición %d)\n", 
+                                          salas[sala_idx].nombre, pos);
+                                    en_espera = 1;
+                                }
+                            }
+                            if(!en_espera){
+                                sendf(fd,"Estado: No estás en ninguna sala ni en cola de espera\n");
+                            }
+                        }
+                    }
                     else if(strcmp(cmd,"help")==0 || strcmp(cmd,"-help")==0){
                         sendf(fd,
-                              "Comandos:\n"
-                              " join <sala> <usuario>\n"
-                              " show | show all | show users | show all users\n"
-                              " leave\n"
-                              " texto libre -> mensaje a tu sala\n");
+                              "Comandos disponibles:\n"
+                              " join <sala> - Unirte a una sala (si está llena, quedas en espera)\n"
+                              " leave <sala> - Salir de tu sala actual\n"
+                              " show - Muestra las salas activas\n"
+                              " show all - Muestra todas las salas registradas\n"
+                              " show users - Muestra los usuarios de tu sala actual\n"
+                              " show all users - Muestra los usuarios de todas las salas\n"
+                              " status - Muestra tu estado actual en sala o espera\n"
+                              " \n");
                     }
                     else if(strcmp(cmd,"msg")==0){
                         if(!clients[i].joined){ sendf(fd,"ERR primero join\n"); }
@@ -392,13 +582,11 @@ int main(int argc, char** argv){
                                 struct sala *sa=&salas[clients[i].sala_idx];
                                 loguear_mensaje(sa->nombre, clients[i].nombre, text);
                                 enviar_a_sala_menos_remitente(clients[i].sala_idx, fd, clients[i].nombre, text);
-                                // opcional: eco de OK como hacías para CMD_SEND
-                                // sendf(fd,"OK enviado\n");
                             }
                         }
                     }
                     else{
-                        // texto libre -> mensaje (igual que antes)
+                        // texto libre -> mensaje (igual que antes en mensajes V)
                         if(!clients[i].joined){ sendf(fd,"No estás en ninguna sala. Usa 'join <sala>' para unirte a una.\n"); }
                         else{
                             struct sala *sa=&salas[clients[i].sala_idx];

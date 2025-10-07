@@ -1,3 +1,5 @@
 General
 Deportes
 Cocina
+salaPrueba
+salaStress
