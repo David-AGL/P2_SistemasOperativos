@@ -515,7 +515,7 @@ int main(int argc, char** argv){
                                 sendf(fd," - %s\n", sa->usuarios[u].nombre);
                         }
                     }
-                    else if (strcasecmp(s,"show all")==0){
+                    else if (strcasecmp(s,"show all rooms")==0){
                         FILE* rf=fopen(ROOMS_FILE,"r");
                         if(!rf){ sendf(fd,"Salas registradas (todas):\n"); }
                         else{
@@ -528,7 +528,7 @@ int main(int argc, char** argv){
                             fclose(rf);
                         }
                     }
-                    else if (strcasecmp(s,"show")==0){
+                    else if (strcasecmp(s,"show rooms")==0){
                         // Salas activas (con usuarios)
                         int printed=0; sendf(fd,"Salas activas:\n");
                         for(int a=0;a<num_salas;a++){
@@ -567,8 +567,8 @@ int main(int argc, char** argv){
                               "Comandos disponibles:\n"
                               " join <sala> - Unirte a una sala (si está llena, quedas en espera)\n"
                               " leave <sala> - Salir de tu sala actual\n"
-                              " show - Muestra las salas activas\n"
-                              " show all - Muestra todas las salas registradas\n"
+                              " show rooms - Muestra las salas activas\n"
+                              " show all rooms - Muestra todas las salas registradas\n"
                               " show users - Muestra los usuarios de tu sala actual\n"
                               " show all users - Muestra los usuarios de todas las salas\n"
                               " status - Muestra tu estado actual en sala o espera\n"

@@ -72,10 +72,10 @@ int main(int argc, char** argv){
                 send(s,"show all users\n",15,0);
             } else if(!strncasecmp(line,"show users",10)){
                 send(s,"show users\n",11,0);
-            } else if(!strncasecmp(line,"show all",8)){
-                send(s,"show all\n",9,0);
-            } else if(!strncasecmp(line,"show",4)){
-                send(s,"show\n",5,0);
+            } else if(!strncasecmp(line,"show all rooms",8)){
+                send(s,"show all rooms\n",15,0);
+            } else if(!strncasecmp(line,"show rooms",4)){
+                send(s,"show rooms\n",11,0);
             } else if(!strncasecmp(line,"leave ",6)){
                 char sala[128]={0}; sscanf(line+6,"%127s",sala);
                 if(strlen(sala)==0){
