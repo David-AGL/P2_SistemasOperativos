@@ -281,6 +281,11 @@ static int sala_dequeue_espera(int idx, int* out_fd, char* out_nombre){
     return 1; 
 }
 
+/* Verifica si un usuario (fd) ya está en la cola de espera de la sala idx.
+   Retorno:
+     1  : está en la cola
+     0  : no está en la cola o error
+*/
 static int sala_ya_en_espera(int idx, int fd){
     if(idx<0||idx>=num_salas) return 0;
     struct sala *s=&salas[idx];
@@ -291,6 +296,11 @@ static int sala_ya_en_espera(int idx, int fd){
     return 0;
 }
 
+/* Obtiene la posición (1-based) en la cola de espera del usuario (fd) en la sala idx.
+   Retorno:
+     >0  : posición en la cola (1-based)
+      0  : no está en la cola o error
+*/
 static int sala_pos_espera(int idx, int fd){
     if(idx<0||idx>=num_salas) return -1;
     struct sala *s=&salas[idx]; 
@@ -349,6 +359,7 @@ static void sendf(int fd, const char* fmt, ...){
     send(fd, b, strlen(b), 0);        // enviar el contenido del buffer
 }
 
+// Envía un mensaje a todos los usuarios de una sala excepto al remitente original.
 static void enviar_a_sala_menos_remitente(int idx_sala, int fd_rem, const char* remitente, const char* texto){
     if(idx_sala<0||idx_sala>=num_salas) return;
     struct sala *s=&salas[idx_sala];
@@ -360,6 +371,8 @@ static void enviar_a_sala_menos_remitente(int idx_sala, int fd_rem, const char* 
         // sendf(fd, "FROM %s %s %s\n", s->nombre, remitente, texto);
     }
 }
+
+// Cuenta usuarios activos en la sala (por índice).
 static int room_count_idx(int idx){
     if(idx<0||idx>=num_salas) return 0; return salas[idx].num_usuarios;
 }
@@ -386,6 +399,8 @@ static void remove_from_all_wait_queues(int fd){
         }
     }
 }
+
+// Intenta promover usuarios desde la cola de espera a la sala si hay cupo.
 static void try_promote_from_wait(int idx_sala){
     if(idx_sala<0||idx_sala>=num_salas) return;
     struct sala *s=&salas[idx_sala];
@@ -395,6 +410,7 @@ static void try_promote_from_wait(int idx_sala){
         int wfd=-1; 
         char wname[MAX_NOMBRE]={0};
         
+        // obtener el siguiente en espera
         if (!sala_dequeue_espera(idx_sala, &wfd, wname)) break;
 
         int cliente_idx = -1;
@@ -405,6 +421,7 @@ static void try_promote_from_wait(int idx_sala){
             }
         }
         
+        // Si el cliente ya se desconectó, continuar con el siguiente en espera
         if(cliente_idx == -1) {
             printf("Cliente en espera (fd=%d) desconectado, promoviendo siguiente...\n", wfd);
             continue;

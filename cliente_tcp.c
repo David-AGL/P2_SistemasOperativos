@@ -32,7 +32,7 @@ static int conectar(const char* host, const char* puerto) {
         exit(1);
     }
 
-    int s = -1;                      // Descriptor del socket a devolver
+    int s = -1; // Descriptor del socket a devolver
     // Recorre todas las direcciones devueltas (IPv6 primero normalmente).
     for (rp = res; rp; rp = rp->ai_next) {
         // Crea un socket compatible con esta dirección (familia/protocolo).
