@@ -649,14 +649,17 @@ int main() {
             msgsnd(cola_global, &out, MSGSIZE, 0);
         }
 
-        // LEAVE
+        // LEAVE: procesa salida de un PID de la sala, notifica al resto y confirma al cliente.
+        // Si existe cola de espera, promueve al siguiente y le envía el historial.
+        // Responde con CMD_LEAVE o con mensajes de error según se necesita.
         else if (msg.mtype == MT_GLOBAL_LEAVE && msg.cmd == CMD_LEAVE) {
             int indice_sala = buscar_sala(msg.sala);
             if (indice_sala != -1) {
-                // remover usuario por PID
+                // intentar remover al usuario identificado por PID
                 int removed = -1;
                 for (int i = 0; i < salas[indice_sala].num_usuarios; i++) {
                     if (salas[indice_sala].usuarios[i].pid == msg.pid) {
+                        // compactar el array de usuarios (desplazar hacia la izquierda)
                         for (int j = i; j < salas[indice_sala].num_usuarios - 1; j++)
                             salas[indice_sala].usuarios[j] = salas[indice_sala].usuarios[j + 1];
                         salas[indice_sala].num_usuarios--;
@@ -666,14 +669,17 @@ int main() {
                 }
 
                 if (removed == 0) {
+                     // registrar en consola el evento de salida
                     printf("Usuario %s ha salido de la sala %s (ahora %d/%d)\n",
                            msg.remitente, msg.sala,
                            salas[indice_sala].num_usuarios, salas[indice_sala].capacidad);
 
+                    // notificar al resto de la sala que el usuario salió (mensaje de sistema)
                     char mensaje_sistema[MAX_TEXTO];
                     snprintf(mensaje_sistema, MAX_TEXTO, "%s salió de la sala", msg.remitente);
                     enviar_a_sala_menos_remitente(indice_sala, "", mensaje_sistema);
-
+                    
+                    // enviar confirmación al cliente que pidió el leave
                     struct mensaje out = {0};
                     out.mtype = (long)msg.pid;
                     out.cmd = CMD_LEAVE;

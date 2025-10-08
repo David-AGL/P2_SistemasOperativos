@@ -324,9 +324,11 @@ int main(int argc, char *argv[])
             puts(resp.texto);
         }
 
-        // LEAVE
+        // LEAVE: permite manejar la solicitud de salida de una sala.
         else if (strncmp(comando, "leave ", 6) == 0)
         {
+            // Extraer el nombre de la sala que el usuario indicó
+            // Se usa sscanf para leer el nombre de la sala desde el comando ingresado por el usuario.
             char sala[MAX_NOMBRE];
             sscanf(comando, "leave %s", sala);
             if (strlen(sala) == 0)
@@ -334,7 +336,11 @@ int main(int argc, char *argv[])
                 printf("Uso: leave <nombre_sala>\n");
                 continue;
             }
-
+            //Construir el mensaje a enviar a la cola global para solicitar el LEAVE
+            // - mtype: tipo de mensaje global para JOIN/LEAVE/SHOW...
+            // - cmd: comando específico, LEAVE en este caso
+            // - remitente: nombre del usuario que solicita salir
+            // - sala: nombre de la sala de la que se desea salir
             struct mensaje req = {0};
             req.mtype = MT_GLOBAL_LEAVE;
             req.cmd = CMD_LEAVE;
@@ -343,6 +349,7 @@ int main(int argc, char *argv[])
             strcpy(req.sala, sala);
 
             bloqueo_global = 1;
+            // Enviar la peticion a la cola global, y si falla, mostrar error y continuar
             if (msgsnd(cola_global, &req, MSGSIZE, 0) == -1)
             {
                 bloqueo_global = 0;
@@ -358,10 +365,13 @@ int main(int argc, char *argv[])
             bloqueo_global = 0;
 
             printf("%s\n", resp.texto);
+            // Si salió de la sala en la que estaba, limpiar estado local
+            // para mostrar que ya no está en ninguna sala
+
             if (strcmp(sala, sala_actual) == 0)
             {
                 cola_sala = -1;
-                sala_actual[0] = '\0';
+                sala_actual[0] = '\0';  //borrar nombre de sala actual
             }
         }
 

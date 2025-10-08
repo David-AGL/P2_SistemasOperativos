@@ -1,4 +1,11 @@
 // ./servidor_tcp 5555
+/*
+ TCP server: usa sockets (socket/bind/listen/accept) y select() para manejar conexiones.
+ Cada cliente se identifica por su file descriptor (fd) y se comunica con send/recv.
+En cuanto a  persistencia, los mensajes se guardan en archivos JSONL por sala en LOG_DIR.
+ Esta implementación reemplaza la cola IPC: el protocolo se mueve por mensajes TCP.
+*/
+
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,17 +38,30 @@
 /* forward declaration for sendf so functions that send can call it */
 static void sendf(int fd, const char* fmt, ...);
 
-/* ========== util logs/ndjson (igual que tu versión) ========== */
+/* ========== util logs/ndjson ========== */
+
+ // Asegura que el directorio de logs existe; si no, lo crea con permisos 0700.
 static void ensure_log_dir(void){
     struct stat st; if (stat(LOG_DIR,&st)==-1) { if (mkdir(LOG_DIR,0700)==-1) perror("mkdir logs"); }
 }
+
+// Limpia y normaliza un nombre de sala/archivo.
+// - Elimina barras, saltos de línea y tabuladores para evitar entradas inválidas.
+// - Resulta en un nombre seguro para usar en rutas/archivos.
 static void sanitize(const char* in, char* out, size_t sz){
     size_t j=0; for(size_t i=0; in[i] && j+1<sz; ++i){ unsigned char c=in[i];
         if (c=='/'||c=='\\'||c=='\n'||c=='\r'||c=='\t') continue; out[j++]=c; } out[j]='\0';
 }
+
+// Construye la ruta del archivo de log de la sala.
+// - Usa sanitize() para evitar caracteres peligrosos y genera LOG_DIR/sala_<nombre>.jsonl
 static void room_log_path(const char* sala, char* path, size_t sz){
     char r[MAX_NOMBRE]; sanitize(sala,r,sizeof r); snprintf(path,sz, LOG_DIR "/sala_%s.jsonl", r);
 }
+
+// Escapa una cadena para incluirla como valor JSON entre comillas.
+// - Reemplaza ", \, newline, tab, etc. por sus secuencias escapadas.
+// - Evita generar JSON inválido al escribir logs.
 static void json_escape(const char* in, char* out, size_t outsz){
     size_t j=0; for(size_t i=0; in && in[i] && j+6<outsz; ++i){ unsigned char c=in[i];
         if(c=='\\'||c=='"'){ out[j++]='\\'; out[j++]=c; }
@@ -52,6 +72,8 @@ static void json_escape(const char* in, char* out, size_t outsz){
         else out[j++]=c;
     } out[j]='\0';
 }
+
+// Deshace las secuencias escapadas (\n, \t, \" , \\) a sus caracteres originales.
 static void json_unescape(const char* in, char* out, size_t outsz){
     size_t j=0; for(size_t i=0; in&&in[i]&&j+1<outsz; ++i){
         if(in[i]=='\\'){ char c=in[++i];
@@ -61,6 +83,10 @@ static void json_unescape(const char* in, char* out, size_t outsz){
         } else out[j++]=in[i];
     } out[j]='\0';
 }
+
+// Extrae los campos "from" y "text" de una línea JSONL simple.
+// Busca las claves en la línea y aplica json_unescape.
+// - Permite reconstruir remitente y texto para enviar historial por socket.
 static void extract_from_text(const char* json, char* from, size_t fsz, char* text, size_t tsz){
     const char *pf=strstr(json,"\"from\":\""), *pt=strstr(json,"\"text\":\"");
     if(!pf||!pt){ from[0]=text[0]='\0'; return; }
@@ -70,6 +96,10 @@ static void extract_from_text(const char* json, char* from, size_t fsz, char* te
     while(pt[i] && pt[i]!='"' && i+1<sizeof(bt)){ if(pt[i]=='\\'&&pt[i+1]) bt[i++]=pt[i],bt[i]=pt[i]; else bt[i]=pt[i]; ++i; }
     bt[i]='\0'; json_unescape(bf,from,fsz); json_unescape(bt,text,tsz);
 }
+
+// Añade un mensaje al log de la sala en formato JSONL.
+// - Abre el archivo en modo append, aplica flock(LOCK_EX) para escritura atómica,
+//   escapa campos, escribe una línea JSON con timestamp y cierra el fichero.
 static void loguear_mensaje(const char* sala, const char* remitente, const char* texto){
     if(!sala||!*sala) return;
     char path[256]; room_log_path(sala,path,sizeof path);
@@ -80,6 +110,9 @@ static void loguear_mensaje(const char* sala, const char* remitente, const char*
     fprintf(f, "{\"ts\":%ld,\"sala\":\"%s\",\"from\":\"%s\",\"text\":\"%s\"}\n", (long)ts,er,ef,et);
     fflush(f); flock(fd,LOCK_UN); fclose(f);
 }
+
+// Agrega el nombre de la sala a ROOMS_FILE si no existe ya.
+// Mantiene un listado persistente de salas conocidas, usado para el comando show all rooms.
 static void rooms_file_add_if_new(const char* sala){
     if(!sala||!*sala) return;
     FILE* f=fopen(ROOMS_FILE,"a+"); if(!f) return;
@@ -87,6 +120,11 @@ static void rooms_file_add_if_new(const char* sala){
     while(fgets(line,sizeof line,f)){ line[strcspn(line,"\r\n")]='\0'; if(strcmp(line,sala)==0){ fclose(f); return; } }
     fprintf(f,"%s\n",sala); fclose(f);
 }
+
+// Envía las últimas N líneas del log de la sala al cliente (cfd).
+//  Lee el archivo JSONL en un anillo para devolver solo las N últimas entradas,
+// además, extrae "from" y "text" de cada JSONL y los envía vía sendf al socket del cliente.
+// por último, maneja archivos inexistentes, memoria y libera todo apropiadamente.
 static void send_history_lastN(int cfd, const char* sala, int N){
     if(N<=0) return;
     char path[256]; room_log_path(sala,path,sizeof path);
@@ -100,13 +138,12 @@ static void send_history_lastN(int cfd, const char* sala, int N){
     const char* jsonl=ring[(start+k)%N]; if(!jsonl) continue;
     char from[MAX_NOMBRE]={0}, text[MAX_TEXTO]={0};
     extract_from_text(jsonl,from,sizeof from,text,sizeof text);
-    // Use sendf (which uses send()) to ensure consistent socket writes
     sendf(cfd, "FROM %s %s %s\n", sala, from, text);
     }
     for(size_t k=0;k<cnt;k++) free(ring[k]); free(ring);
 }
 
-/* ========== estructuras de salas (completa como IPC) ========== */
+/* ========== estructuras de salas (sigue la misma lógica que IPC) ========== */
 struct usuario { int fd; char nombre[MAX_NOMBRE]; };
 struct sala {
     char nombre[MAX_NOMBRE];
