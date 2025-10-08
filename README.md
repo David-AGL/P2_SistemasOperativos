@@ -1,4 +1,4 @@
-# Sistema de Chat de Mnesajes(IPC y TCP)
+# Sistema de Chat de Mensajes (IPC y TCP)
 
 Este proyecto contiene dos variantes del mismo chat: una usando System V IPC (colas de mensajes) y otra usando sockets TCP para comunicación en red. Las funcionalidades y comandos son los mismos en ambas versiones.
 
@@ -81,4 +81,3 @@ gcc -o cliente_tcp cliente_tcp.c
 
 ## Notas
 - La persistencia de mensajes se guarda en `logs/` como JSONL por sala.
- "
