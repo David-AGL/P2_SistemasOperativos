@@ -400,6 +400,7 @@ static void remove_from_all_wait_queues(int fd){
     }
 }
 
+
 // Intenta promover usuarios desde la cola de espera a la sala si hay cupo.
 static void try_promote_from_wait(int idx_sala){
     if(idx_sala<0||idx_sala>=num_salas) return;
