@@ -307,17 +307,48 @@ static int sala_pos_espera(int idx, int fd){
 typedef struct { int fd; int joined; char nombre[MAX_NOMBRE]; int sala_idx; } Client;
 static Client clients[MAX_CLIENTS];
 
+// Crea un socket de servidor TCP que escucha en <port> y devuelve el descriptor.
+// Sale del proceso si algo falla.
 static int make_server(uint16_t port){
-    int s=socket(AF_INET,SOCK_STREAM,0); if(s<0){perror("socket"); exit(1);}
-    int yes=1; setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
-    struct sockaddr_in a={0}; a.sin_family=AF_INET; a.sin_addr.s_addr=INADDR_ANY; a.sin_port=htons(port);
-    if(bind(s,(struct sockaddr*)&a,sizeof a)<0){perror("bind"); exit(1);}
-    if(listen(s,64)<0){perror("listen"); exit(1);} return s;
+    // 1) Crear el socket TCP (IPv4)
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { perror("socket"); exit(1); }
+
+    // 2) Reutilizar la dirección/puerto si quedó en TIME_WAIT
+    int yes = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    // 3) Estructura de dirección: 0.0.0.0:<port> (todas las interfaces)
+    struct sockaddr_in a = {0};
+    a.sin_family      = AF_INET;             // IPv4
+    a.sin_addr.s_addr = INADDR_ANY;          // 0.0.0.0 (escuchar en todas las IP locales)
+    a.sin_port        = htons(port);         // puerto en orden de red
+
+    // 4) Asociar el socket a esa dirección/puerto
+    if (bind(s, (struct sockaddr*)&a, sizeof a) < 0) {
+        perror("bind"); exit(1);
+    }
+
+    // 5) Poner el socket en modo escucha con backlog (cola de pendientes)
+    if (listen(s, 64) < 0) {                 // backlog "64" es tamaño sugerido
+        perror("listen"); exit(1);
+    }
+
+    return s;                                 // listo: devolver socket de escucha
 }
+
+// printf-like: formatea en un buffer y lo envía por el socket 'fd'.
 static void sendf(int fd, const char* fmt, ...){
-    char b[2048]; va_list ap; va_start(ap,fmt); vsnprintf(b,sizeof b,fmt,ap); va_end(ap);
-    send(fd,b,strlen(b),0);
+    char b[2048];
+
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+
+    send(fd, b, strlen(b), 0);        // enviar el contenido del buffer
 }
+
 static void enviar_a_sala_menos_remitente(int idx_sala, int fd_rem, const char* remitente, const char* texto){
     if(idx_sala<0||idx_sala>=num_salas) return;
     struct sala *s=&salas[idx_sala];
@@ -405,6 +436,7 @@ static void try_promote_from_wait(int idx_sala){
 /* ========== main TCP con select() ========== */
 int main(int argc, char** argv){
     uint16_t port = (argc>1)? (uint16_t)atoi(argv[1]) : 5555;
+    // Crea el servidor TCP con la ip local y el puerto dado
     int srv = make_server(port);
     ensure_log_dir();
 

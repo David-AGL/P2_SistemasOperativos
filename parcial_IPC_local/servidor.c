@@ -130,11 +130,14 @@ static void guardar_sala_si_nueva(const char *nombre) {
     fclose(f);
 }
 
-
+// Accede al archivo de log de una sala específica
 static void ruta_log_sala(const char* nombre_sala, char* path, size_t sz) {
     snprintf(path, sz, LOG_DIR "/sala_%s.jsonl", nombre_sala);
 }
 
+// Escapa una cadena para incluirla como valor JSON entre comillas.
+// Reemplaza ", \, newline, tab, etc. por sus secuencias escapadas.
+// Evita generar JSON inválido al escribir logs.
 static void json_escape(const char* in, char* out, size_t outsz) {
     size_t j = 0;
     for (size_t i = 0; in && in[i] && j + 6 < outsz; ++i) {
@@ -149,6 +152,11 @@ static void json_escape(const char* in, char* out, size_t outsz) {
     out[j] = '\0';
 }
 
+// Loguea un mensaje en el archivo de log de la sala, si no existe el archivo de logs, lo crea
+// Parametros:
+//      - sala: Nombre de la sala
+//      - remitente: Nombre del usuario que envía el mensaje
+//      - texto: Contenido del mensaje
 static void loguear_mensaje(const char* sala, const char* remitente, const char* texto) {
     if (!sala || !*sala) return;
     char path[512]; ruta_log_sala(sala, path, sizeof(path));
@@ -176,6 +184,7 @@ static void loguear_mensaje(const char* sala, const char* remitente, const char*
     fclose(f);
 }
 
+// Deshace las secuencias escapadas (\n, \t, \" , \\) a sus caracteres originales.
 static void json_unescape(const char* in, char* out, size_t outsz){
     size_t j=0;
     for (size_t i=0; in && in[i] && j+1 < outsz; ++i){
@@ -194,6 +203,9 @@ static void json_unescape(const char* in, char* out, size_t outsz){
     out[j]='\0';
 }
 
+// Extrae los campos "from" y "text" de una línea JSONL simple.
+// Busca las claves en la línea y aplica json_unescape.
+// Permite reconstruir remitente y texto para enviar historial por socket.
 static void extraer_from_y_text(const char* json,
                                 char* from, size_t fromsz,
                                 char* text, size_t textsz)
@@ -224,6 +236,12 @@ static void extraer_from_y_text(const char* json,
     json_unescape(bufT, text, textsz);
 }
 
+// Envia los últimos N mensajes del historial de una sala a un cliente específico
+// Parámetros:
+//      - sala: Nombre de la sala
+//      - qid_sala: ID de la cola de mensajes de la sala
+//      - pid_dest: PID del cliente que recibirá los mensajes
+//      - N: Número de mensajes a enviar
 static void enviar_historial_ultimos(const char* sala, int qid_sala, pid_t pid_dest, int N){
     if (!sala || !*sala || N <= 0) return;
 
@@ -457,6 +475,9 @@ void notificar_sala_excluyendo(int indice_sala, const char *nombre_excluir, cons
     }
 }
 
+// Encuentra la sala en la que está un usuario dado su PID
+// Parámetros:
+//      - pid_busca: PID del usuario a buscar
 static int encontrar_sala_por_pid(pid_t pid_busca) {
     for (int i = 0; i < num_salas; i++)
         for (int j = 0; j < salas[i].num_usuarios; j++)
@@ -464,6 +485,7 @@ static int encontrar_sala_por_pid(pid_t pid_busca) {
     return -1;
 }
 
+// Lista los usuarios que pertenecen a una sala en específico
 static void listar_usuarios_de_sala_en_texto(int idx_sala, char *dst, size_t dstsz) {
     if (idx_sala < 0 || idx_sala >= num_salas || dstsz == 0) { if (dstsz) dst[0]='\0'; return; }
     size_t off = 0; int rem = (int)dstsz;
@@ -480,6 +502,7 @@ static void listar_usuarios_de_sala_en_texto(int idx_sala, char *dst, size_t dst
     }
 }
 
+// Lista todos los usuarios en todas las salas
 static void listar_todos_los_usuarios_en_texto(char *dst, size_t dstsz) {
     if (dstsz == 0) return;
     size_t off = 0; int rem = (int)dstsz;
@@ -594,6 +617,7 @@ int main() {
             int indice_sala = buscar_sala(msg.sala);
             if (indice_sala != -1) {
                 printf("Mensaje en la sala %s de %s: %s\n", msg.sala, msg.remitente, msg.texto);
+                // Registra el mensaje en el log de la sala
                 loguear_mensaje(msg.sala, msg.remitente, msg.texto);
                 enviar_a_sala_menos_remitente(indice_sala, msg.remitente, msg.texto);
             }

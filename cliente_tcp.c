@@ -18,12 +18,45 @@ static int en_sala = 0;             // Flag si estaen alguna sala
 static int en_espera = 0;            // Flag si esta en cola de espera
 static char sala_espera[128] = "";   // Sala para la que está esperando
 
-static int conectar(const char* host, const char* puerto){
-    struct addrinfo hints={0}, *res,*rp; hints.ai_family=AF_UNSPEC; hints.ai_socktype=SOCK_STREAM;
-    int rc=getaddrinfo(host,puerto,&hints,&res); if(rc!=0){ fprintf(stderr,"getaddrinfo: %s\n",gai_strerror(rc)); exit(1); }
-    int s=-1; for(rp=res; rp; rp=rp->ai_next){ s=socket(rp->ai_family,rp->ai_socktype,rp->ai_protocol);
-        if(s==-1) continue; if(connect(s,rp->ai_addr,rp->ai_addrlen)==0) break; close(s); s=-1; }
-    freeaddrinfo(res); if(s==-1){ perror("connect"); exit(1);} return s;
+// Conecta por TCP (IPv4 o IPv6) a <host>:<puerto> y devuelve el descriptor del socket.
+static int conectar(const char* host, const char* puerto) {
+    // Estructuras para resolver host/puerto a direcciones de socket.
+    struct addrinfo hints = {0}, *res, *rp;
+    hints.ai_family   = AF_UNSPEC;   // Acepta IPv4 o IPv6 (lo que haya).
+    hints.ai_socktype = SOCK_STREAM; // Queremos TCP (stream).
+
+    // Resuelve host y puerto a una lista enlazada de direcciones (res).
+    int rc = getaddrinfo(host, puerto, &hints, &res);
+    if (rc != 0) {                   // Error al resolver DNS/puerto
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+        exit(1);
+    }
+
+    int s = -1;                      // Descriptor del socket a devolver
+    // Recorre todas las direcciones devueltas (IPv6 primero normalmente).
+    for (rp = res; rp; rp = rp->ai_next) {
+        // Crea un socket compatible con esta dirección (familia/protocolo).
+        s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (s == -1)                 // No se pudo crear -> prueba la siguiente
+            continue;
+
+        // Intenta conectar con esta dirección.
+        if (connect(s, rp->ai_addr, rp->ai_addrlen) == 0)
+            break;                   // ¡Conectó! sal del bucle
+
+        // Si connect falló, cierra este socket y prueba con la siguiente dirección.
+        close(s);
+        s = -1;
+    }
+
+    freeaddrinfo(res);               // Libera la lista devuelta por getaddrinfo
+
+    if (s == -1) {                   // Si no conectamos con ninguna dirección
+        perror("connect");           // imprime el último error de sistema
+        exit(1);
+    }
+
+    return s;                        // Socket ya conectado (listo para send/recv)
 }
 
 int main(int argc, char** argv){
@@ -37,6 +70,7 @@ int main(int argc, char** argv){
     
     char setup_cmd[MAX_LINE];
     snprintf(setup_cmd, sizeof setup_cmd, "%s\n", user);
+    // send() escribe bytes al socket conectado
     send(s, setup_cmd, strlen(setup_cmd), 0);
 
     char line[MAX_LINE];
@@ -89,7 +123,7 @@ int main(int argc, char** argv){
                 char out[MAX_LINE]; snprintf(out,sizeof out,"leave %s\n", sala);
                 send(s,out,strlen(out),0);
             } else if(!strncasecmp(line,"leave",5)){
-                // Require explicit room: do not send bare 'leave'
+                // Requiere sala explícita: no acepta solo "leave"
                 printf("Uso: leave <nombre_sala>\n");
                 continue;
             } else if(!strncasecmp(line,"status",6) || !strncasecmp(line,"estado",6)){
