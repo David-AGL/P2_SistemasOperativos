@@ -23,6 +23,7 @@ En cuanto a  persistencia, los mensajes se guardan en archivos JSONL por sala en
 #include <sys/stat.h>
 #include <sys/file.h>
 
+
 #define MAX_SALAS 10
 #define MAX_USUARIOS_POR_SALA 20
 #define MAX_TEXTO 256
@@ -122,7 +123,7 @@ static void rooms_file_add_if_new(const char* sala){
 }
 
 // Envía las últimas N líneas del log de la sala al cliente (cfd).
-//  Lee el archivo JSONL en un anillo para devolver solo las N últimas entradas,
+// Lee el archivo JSONL en un anillo para devolver solo las N últimas entradas,
 // además, extrae "from" y "text" de cada JSONL y los envía vía sendf al socket del cliente.
 // por último, maneja archivos inexistentes, memoria y libera todo apropiadamente.
 static void send_history_lastN(int cfd, const char* sala, int N){
@@ -143,7 +144,17 @@ static void send_history_lastN(int cfd, const char* sala, int N){
     for(size_t k=0;k<cnt;k++) free(ring[k]); free(ring);
 }
 
-/* ========== estructuras de salas (sigue la misma lógica que IPC) ========== */
+/* ========== Estructuras de salas (sigue la misma lógica que IPC) ========== */
+
+// Definición de Struct para gestionar salas de chat
+// Campos:
+//   - nombre: Nombre de la sala
+//   - num_usuarios: Número actual de usuarios en la sala
+//   - usuarios: Array de usuarios presentes en la sala (fd + nombre)
+//   - capacidad: Capacidad máxima de usuarios permitida en la sala
+//   - espera_fds: Array de file descriptors de usuarios en espera (cola FIFO)
+//   - espera_nombres: Array de nombres correspondientes a la cola de espera
+//   - espera_ini, espera_fin, espera_len: índices y longitud para gestionar la cola 
 struct usuario { int fd; char nombre[MAX_NOMBRE]; };
 struct sala {
     char nombre[MAX_NOMBRE];
@@ -155,9 +166,14 @@ struct sala {
     char espera_nombres[MAX_USUARIOS_POR_SALA*2][MAX_NOMBRE];
     int espera_ini, espera_fin, espera_len;
 };
+
 static struct sala salas[MAX_SALAS];
 static int num_salas = 0;
 
+/* Crea una nueva sala con nombre `nombre`.
+   Retorno:
+     >=0 : índice de la sala creada en el array `salas`
+     -1  : no pudo crear (límite MAX_SALAS alcanzado) */
 static int crear_sala(const char* nombre){
     if(num_salas>=MAX_SALAS) return -1;
     strcpy(salas[num_salas].nombre,nombre);
@@ -166,14 +182,34 @@ static int crear_sala(const char* nombre){
     salas[num_salas].espera_ini=salas[num_salas].espera_fin=salas[num_salas].espera_len=0;
     num_salas++; return num_salas-1;
 }
+
+/* Busca la sala por nombre.
+   Retorno:
+     >=0 : índice de la sala encontrada
+     -1  : no existe la sala 
+*/
 static int buscar_sala(const char* nombre){
     for(int i=0;i<num_salas;i++) if(strcmp(salas[i].nombre,nombre)==0) return i;
     return -1;
 }
+
+/* Cuenta usuarios activos en la sala (por nombre).
+   Retorno:
+     >=0 : número de usuarios (0 si no existe o está de momento vacío) 
+*/
 static int sala_count_fd(const char* sala){
     int idx=buscar_sala(sala); if(idx<0) return 0;
     return salas[idx].num_usuarios;
 }
+
+/* Agrega un usuario a la sala si hay capacidad.
+   Parámetros: idx = índice de sala, nombre = nombre de usuario, fd = descriptor del cliente
+   Retorno:
+     1  : agregado correctamente
+     0  : ya estaba presente (por fd)
+    -2  : sala llena (capacidad alcanzada)
+    -1  : error 
+ */
 static int sala_add_usuario_cap(int idx, const char* nombre, int fd){
     if(idx<0||idx>=num_salas) return -1;
     struct sala *s=&salas[idx];
@@ -186,6 +222,12 @@ static int sala_add_usuario_cap(int idx, const char* nombre, int fd){
     s->num_usuarios++;
     return 1;
 }
+
+/* Elimina un usuario de la sala por su fd.
+   Retorno:
+     0  : eliminado correctamente
+    -1  : no encontrado o error 
+*/
 static int sala_remove_usuario(int idx, int fd){
     if(idx<0||idx>=num_salas) return -1;
     struct sala *s=&salas[idx];
@@ -197,7 +239,12 @@ static int sala_remove_usuario(int idx, int fd){
     }
     return -1;
 }
-// Funciones de cola de espera 
+/* Encola en la lista de espera (FIFO) para la sala idx.
+    Retorno:
+     >0  : posición (1-based) en la cola después de encolar
+      0  : ya estaba en la cola
+     -1  : error u overflow
+*/
 static int sala_enqueue_espera(int idx, int fd, const char* nombre){
     if(idx<0||idx>=num_salas) return -1;
     struct sala *s=&salas[idx];
@@ -214,7 +261,12 @@ static int sala_enqueue_espera(int idx, int fd, const char* nombre){
     s->espera_len++;
     return s->espera_len; // retorna posición en cola
 }
-
+/* Desencola el primer elemento de la cola de espera.
+   Si out_fd/out_nombre no son nulos, devuelve los datos del primero en espera.
+   Retorno:
+     1  : se devolvió un elemento y se avanzó la cola
+     0  : cola vacía 
+*/
 static int sala_dequeue_espera(int idx, int* out_fd, char* out_nombre){
     if(idx<0||idx>=num_salas) return 0;
     struct sala *s=&salas[idx];

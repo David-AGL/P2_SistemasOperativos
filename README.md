@@ -2,13 +2,13 @@
 
 Este proyecto contiene dos variantes del mismo chat: una usando System V IPC (colas de mensajes) y otra usando sockets TCP para comunicación en red. Las funcionalidades y comandos son los mismos en ambas versiones.
 
-## Requisitos
+## 📦 Requisitos
 - Linux
 - gcc
 - Biblioteca de hilos (`pthread`, ya incluida en Linux). 
 
 
-## Compilación
+## 🔧 Compilación
 
 ### Versión IPC (colas System V)
 Compilar servidor y cliente IPC:
@@ -24,7 +24,7 @@ gcc -o servidor_tcp servidor_tcp.c
 gcc -o cliente_tcp cliente_tcp.c
 ```
 
-## Ejecución
+## ▶️ Ejecución
 
 ### IPC
 1. Inicia el servidor IPC:
@@ -48,7 +48,7 @@ gcc -o cliente_tcp cliente_tcp.c
 ./cliente_tcp <IP_DEL_SERVIDOR> 5555 Juan
 ```
 
-## Comandos disponibles (idénticos en IPC y TCP)
+## 🤖 Comandos disponibles (idénticos en IPC y TCP)
 
 - **Ver la lista de comandos disponibles:**
 
@@ -81,4 +81,4 @@ gcc -o cliente_tcp cliente_tcp.c
 
 ## Notas
 - La persistencia de mensajes se guarda en `logs/` como JSONL por sala.
-
+ "
