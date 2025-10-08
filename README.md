@@ -41,14 +41,30 @@ gcc -o cliente cliente.c -lpthread
 
 3. Comandos disponibles:
 
-- **Unirse a una sala:**
+- **Ver la lista de comandos disponibles:**
 
-  ```bash
-  > join General
-  ```
+  > -help
 
-- **Enviar un mensaje (una vez unido):**
+- **Unirse a una sala (si está llena, quedas en espera):**
 
-  ```bash
-  > Hola a todos!
-  ```  
+  > join <sala>
+
+- **Salir de una sala:**
+
+  > leave <sala>
+
+- **Mostrar las salas activas (con usuarios conectados):**
+
+  > show rooms
+
+- **Mostrar todas las salas registradas (incluso las vacías):**
+
+  > show all rooms
+
+- **Mostrar los usuarios de tu sala actual:**
+
+  > show users
+
+- **Mostrar los usuarios de todas las salas:**
+
+  > show all users
