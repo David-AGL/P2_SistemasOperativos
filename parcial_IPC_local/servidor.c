@@ -270,7 +270,15 @@ static void enviar_historial_ultimos(const char* sala, int qid_sala, pid_t pid_d
     free(ring);
 }
 
-
+// Crear_sala: crea una nueva sala de chat y su cola de mensajes asociada
+// Parámetros:
+//   - nombre: nombre de la sala a crear
+// Retorna:
+//   - índice de la sala creada en el arreglo global 'salas'
+//   - -1 si no se pudo crear (por límite de salas o error de IPC)
+// Notas:
+//   - Se usa ftok() y msgget() para generar y crear una cola única para la sala.
+//   - Inicializa la capacidad, número de usuarios y la cola de espera.
 int crear_sala(const char *nombre) {
     if (num_salas >= MAX_SALAS) return -1;
 
@@ -290,6 +298,14 @@ int crear_sala(const char *nombre) {
     return num_salas - 1;
 }
 
+// Buscar_sala: busca una sala por su nombre en el arreglo global 'salas'
+// Parámetros:
+//   - nombre: nombre de la sala a buscar
+// Retorna:
+//   * índice de la sala si existe
+//   * -1 si no se encontró
+// Nota:
+//   - Se utiliza strcmp() para comparar nombres de sala.
 int buscar_sala(const char *nombre) {
     for (int i = 0; i < num_salas; i++)
         if (strcmp(salas[i].nombre, nombre) == 0) return i;
@@ -388,7 +404,15 @@ static int sala_add_usuario_cap(int idx, const char* nombre, pid_t pid) {
     return 1;
 }
 
-// ==== util envío a sala ====
+// Enviar_a_sala_menos_remitente: envía un mensaje a todos los usuarios de una sala
+// excepto al remitente original.
+// Parámetros:
+//   - indice_sala: índice de la sala en el arreglo global 'salas'
+//   - remitente: nombre del usuario que envía el mensaje
+//   - texto: contenido del mensaje a reenviar
+// Notas:
+//   - Se ignora el remitente comparando nombres.
+//   - Se usa msgsnd() para enviar el mensaje a cada usuario conectado a la sala.
 void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const char *texto) {
     if (indice_sala < 0 || indice_sala >= num_salas) return;
     struct sala *s = &salas[indice_sala];
@@ -406,6 +430,15 @@ void enviar_a_sala_menos_remitente(int indice_sala, const char *remitente, const
     }
 }
 
+// Notificar_sala_excluyendo: envía una notificación del sistema a todos los usuarios
+// de una sala, excepto al usuario especificado.
+// Parámetros:
+//   - indice_sala: índice de la sala en el arreglo global 'salas'
+//   - nombre_excluir: nombre del usuario que no debe recibir la notificación
+//   - remitente_mostrar: texto que se mostrará como "remitente" (vacío)
+//   - texto: mensaje que describe el evento a notificar
+// Notas:
+//   - Esta función no es llamada por los usuarios, sino por el servidor.
 void notificar_sala_excluyendo(int indice_sala, const char *nombre_excluir, const char *remitente_mostrar, const char *texto) {
     if (indice_sala < 0 || indice_sala >= num_salas) return;
     struct sala *s = &salas[indice_sala];
@@ -469,22 +502,34 @@ static void listar_todos_los_usuarios_en_texto(char *dst, size_t dstsz) {
 }
 
 int main() {
+
+    // Genera una clave IPC única para la cola global de mensajes.
     key_t key_global = ftok("/tmp", 'G');
+
+    // Crea (o abre si ya existe) la cola de mensajes global para coordinar acciones.
     int cola_global = msgget(key_global, IPC_CREAT | 0666);
     if (cola_global == -1) { perror("Error al crear la cola global"); exit(1); }
 
+    // Muestra mensaje de inicio del servidor.
     printf("Servidor de chat iniciado. Esperando clientes...\n");
+
+    // Carga las salas existentes desde el archivo 'salas.txt' (persistencia).
     cargar_salas_desde_archivo();
 
+    // Estructura para recibir los mensajes entrantes.
     struct mensaje msg;
 
+    // Bucle principal del servidor para procesar mensajes entrantes.
     while (1) {
         if (msgrcv(cola_global, &msg, MSGSIZE, 0, 0) == -1) {
             perror("Error al recibir mensaje");
             continue;
         }
 
-        // JOIN
+        // --- JOIN ---
+        // Maneja la solicitud de un cliente para unirse a una sala.
+        // Si la sala no existe, se crea y se guarda en 'salas.txt'.
+        // Si ocurre un error al crearla, se omite la solicitud.
         if (msg.mtype == MT_GLOBAL_JOIN && msg.cmd == CMD_JOIN) {
             int indice_sala = buscar_sala(msg.sala);
             if (indice_sala == -1) {
