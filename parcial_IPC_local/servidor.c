@@ -1,3 +1,4 @@
+// Incluye estandares de C y librerias de IPC
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,17 +11,18 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 
+// Definicion de constantes
 #define MAX_SALAS 10
 #define MAX_USUARIOS_POR_SALA 20
 #define MAX_TEXTO 256
 #define MAX_NOMBRE 50
-#define LOG_DIR "logs"
-
-// Capacidad / cola de espera
+#define LOG_DIR "logs" // Directorio para logs (Persistencia de mensajes)
 #define CAPACIDAD_SALA_POR_DEFECTO 3
 #define MAX_EN_ESPERA 64
 
-// --- MTYPES (cola global) ---
+// Definicion de mtype (tipo de mensaje) necesario para la clasificación de mensajes
+// que se envian a la cola de mensajes global. Cada tipo de mensaje representa una acción
+// o comando específico que el servidor debe manejar.
 #define MT_GLOBAL_JOIN 1L
 #define MT_GLOBAL_SEND 3L
 #define MT_GLOBAL_SHOW 5L
@@ -29,7 +31,7 @@
 #define MT_GLOBAL_SHOW_USERS 11L
 #define MT_GLOBAL_SHOW_ALL_USERS 13L
 
-// --- COMANDOS ---
+// Definicion de comandos (cmd) que indican la acción específica que se debe realizar
 #define CMD_JOIN 1
 #define CMD_SEND 2
 #define CMD_SHOW 3
@@ -40,7 +42,16 @@
 #define CMD_SHOW_USERS 11
 #define CMD_SHOW_ALL_USERS 13
 
-// --- Mensaje ---
+// Definición de estruct de mensaje
+// Campos:
+//      - mtype: Tipo de mensaje (usado por la cola de mensajes)
+//      - cmd: Comando específico (acción a realizar)
+//      - client_qid: ID de la cola de mensajes del cliente
+//      - pid: ID del proceso del cliente que envía el mensaje
+//      - sala_qid: ID de la cola de mensajes de la sala (usado en respuestas JOIN y en la promoción desde espera)
+//      - remitente: Nombre del usuario que envía el mensaje
+//      - texto: Contenido del mensaje
+//      - sala: Nombre de la sala a la que se refiere el mensaje
 struct mensaje {
     long mtype;
     int cmd;
@@ -52,31 +63,49 @@ struct mensaje {
     char sala[MAX_NOMBRE]; // nombre de sala
 };
 
+// Tamaño del mensaje sin incluir mtype
 #define MSGSIZE (sizeof(struct mensaje) - sizeof(long))
 
-// --- Modelo en memoria ---
+// Definición de Struct para gestionar usuarios 
+// Campos:
+//      - pid: ID del proceso del usuario
+//      - nombre: Nombre del usuario
+
 struct usuario {
     pid_t pid;
     char nombre[MAX_NOMBRE];
 };
 
+// Definición de Struct para gestionar salas de chat
+// Campos:
+//      - nombre: Nombre de la sala
+//      - cola_id: ID de la cola de mensajes asociada a la sala
+//      - num_usuarios: Número actual de usuarios en la sala
+//      - usuarios: Array de usuarios en la sala
+//      - capacidad: Capacidad máxima de usuarios en la sala
+//      - espera_pids: Array de PIDs de usuarios en espera para entrar a la sala
+//      - espera_nombres: Array de nombres de usuarios en espera
+//      - espera_ini, espera_fin, espera_len: Variables para gestionar la cola circular de espera
 struct sala {
     char nombre[MAX_NOMBRE];
     int  cola_id;
     int  num_usuarios;
     struct usuario usuarios[MAX_USUARIOS_POR_SALA];
-
-    // capacidad + cola de espera (FIFO circular)
     int  capacidad;
     pid_t espera_pids[MAX_EN_ESPERA];
     char  espera_nombres[MAX_EN_ESPERA][MAX_NOMBRE];
     int   espera_ini, espera_fin, espera_len;
 };
 
+// Array de salas y contador de salas
 struct sala salas[MAX_SALAS];
 int num_salas = 0;
 
-// ==== util persistencia simple de nombres de sala ====
+// Sala_existe_archivo: Verifica si una sala ya existe en el archivo "salas.txt"
+// Parametros:
+//      - nombre: Nombre de la sala a verificar
+// Retorna:
+//      - true si la sala existe en el archivo "salas.txt", false en caso
 static bool sala_existe_archivo(const char *nombre) {
     FILE *f = fopen("salas.txt", "r");
     if (!f) return false;
@@ -90,6 +119,9 @@ static bool sala_existe_archivo(const char *nombre) {
     return existe;
 }
 
+// guardar_sala_si_nueva: Guarda el nombre de una sala en el archivo "salas.txt" si no existe ya
+// Parametros:
+//      - nombre: Nombre de la sala a guardar
 static void guardar_sala_si_nueva(const char *nombre) {
     if (sala_existe_archivo(nombre)) return;
     FILE *f = fopen("salas.txt", "a");
@@ -98,7 +130,7 @@ static void guardar_sala_si_nueva(const char *nombre) {
     fclose(f);
 }
 
-// ==== logging (historial) ====
+
 static void ruta_log_sala(const char* nombre_sala, char* path, size_t sz) {
     snprintf(path, sz, LOG_DIR "/sala_%s.jsonl", nombre_sala);
 }
@@ -238,7 +270,7 @@ static void enviar_historial_ultimos(const char* sala, int qid_sala, pid_t pid_d
     free(ring);
 }
 
-// ==== Salas en memoria ====
+
 int crear_sala(const char *nombre) {
     if (num_salas >= MAX_SALAS) return -1;
 
@@ -264,6 +296,8 @@ int buscar_sala(const char *nombre) {
     return -1;
 }
 
+// cargar_salas_desde_archivo: Carga los nombres de las salas desde el archivo "salas.txt"
+// y crea las salas en memoria si no existen ya.
 static void cargar_salas_desde_archivo(void) {
     FILE *f = fopen("salas.txt", "r");
     if (!f) return;
@@ -278,7 +312,13 @@ static void cargar_salas_desde_archivo(void) {
     fclose(f);
 }
 
-// ==== helpers capacidad/espera ====
+// Sala_enqueue_espera: Agrega un usuario a la cola de espera de una sala
+// Parametros:
+//      - idx: Índice de la sala en el array de salas
+//      - pid: PID del usuario a agregar a la espera
+//      - nombre: Nombre del usuario a agregar a la espera
+// Retorna:
+//      - Posición en la cola de espera si se agregó correctamente
 static int sala_enqueue_espera(int idx, pid_t pid, const char* nombre) {
     struct sala* s = &salas[idx];
     if (s->espera_len >= MAX_EN_ESPERA) return -1;
@@ -290,6 +330,13 @@ static int sala_enqueue_espera(int idx, pid_t pid, const char* nombre) {
     return s->espera_len;
 }
 
+// Sala_dequeue_espera: Remueve y obtiene el siguiente usuario en la cola de espera de una sala
+// Parametros:
+//      - idx: Índice de la sala en el array de salas
+//      - pid_out: Puntero para almacenar el PID del usuario removido (puede ser NULL)
+//      - nombre_out: Puntero para almacenar el nombre del usuario removido (puede ser NULL)
+// Retorna:
+//      - 1 si se removió un usuario, 0 si la cola de espera está vacía
 static int sala_dequeue_espera(int idx, pid_t* pid_out, char* nombre_out) {
     struct sala* s = &salas[idx];
     if (s->espera_len == 0) return 0;
@@ -303,6 +350,10 @@ static int sala_dequeue_espera(int idx, pid_t* pid_out, char* nombre_out) {
     return 1;
 }
 
+// sala_ya_en_espera: Verifica si un usuario ya está en la cola de espera de una sala
+// Parametros:
+//      - idx: Índice de la sala en el array de salas
+//      - pid: PID del usuario a verificar
 static int sala_ya_en_espera(int idx, pid_t pid) {
     struct sala* s = &salas[idx];
     for (int k = 0; k < s->espera_len; k++) {
@@ -312,7 +363,16 @@ static int sala_ya_en_espera(int idx, pid_t pid) {
     return 0;
 }
 
-// 1=agregado, 0=ya estaba, -2=capacidad llena, -1=overflow
+// sala_add_usuario_cap: Agrega un usuario a una sala si hay capacidad
+// Parametros:
+//      - idx: Índice de la sala en el array de salas
+//      - nombre: Nombre del usuario a agregar
+//      - pid: PID del usuario a agregar
+// Retorna:
+//      - 1=agregado
+//      - 0=ya estaba
+//      - 2=capacidad llena
+//      - -1=overflow
 static int sala_add_usuario_cap(int idx, const char* nombre, pid_t pid) {
     struct sala* s = &salas[idx];
     if (s->num_usuarios >= s->capacidad)             return -2;
@@ -457,7 +517,7 @@ int main() {
                 enviar_historial_ultimos(msg.sala, salas[indice_sala].cola_id, msg.pid, 10);
             }
             else if (add == -2) {
-                // capacidad llena → cola de espera
+                // cSi a tiene una solicitud de espera, notificarlo
                 if (sala_ya_en_espera(indice_sala, msg.pid)) {
                     struct mensaje out = (struct mensaje){0};
                     out.mtype = (long)msg.pid; out.cmd = CMD_INFO;
@@ -466,6 +526,7 @@ int main() {
                              msg.sala);
                     msgsnd(cola_global, &out, MSGSIZE, 0);
                 } else {
+                    // Agregar a sala de espera
                     int pos = sala_enqueue_espera(indice_sala, msg.pid, msg.remitente);
                     printf("Sala '%s' llena. %s queda en espera (pos=%d)\n", msg.sala, msg.remitente, pos);
 
@@ -493,7 +554,7 @@ int main() {
             }
         }
 
-        // SHOW
+        // Acción del comando SHOW: ver la lista de salas activas (con usuarios)
         else if (msg.mtype == MT_GLOBAL_SHOW && msg.cmd == CMD_SHOW) {
             struct mensaje out = {0};
             out.mtype = msg.pid;
@@ -520,7 +581,7 @@ int main() {
             msgsnd(cola_global, &out, MSGSIZE, 0);
         }
 
-        // SHOW ALL
+        // Acción del comando SHOW_ALL: ver la lista de todas las salas (incluso vacías)
         else if (msg.mtype == MT_GLOBAL_SHOW_ALL && msg.cmd == CMD_SHOW_ALL) {
             struct mensaje out = {0};
             out.mtype = msg.pid;
